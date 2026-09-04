@@ -159,12 +159,35 @@ generate a manifest.
 
 ## Verification
 
-Validated against mainnet at block 21,000,000 and at real vault-creation blocks:
-markets, positions and vault events decode and accumulate, and vault metadata
-matches the Morpho API exactly (e.g. `MC.wM` / "MEV Capital M^0 Vault" at block
-20,873,628). Absolute totals across a full backfill are **not** yet verified —
-that needs a paid endpoint, since store backfill from block 18883124 exceeds the
-free tier's 10,000-block limit.
+**Event-sourced totals match on-chain storage exactly.** Verified by picking
+markets created *after* the manifest's initial block — so the stores observe
+their entire life — running to a fixed block, and reading `Morpho.market(id)`
+at that same block via archive `eth_call`:
+
+| market | field | indexed | on-chain |
+| --- | --- | --- | --- |
+| `0x8ab1b309…` | `total_supply_assets` | 101000 | 101000 |
+| | `total_supply_shares` | 101000000000 | 101000000000 |
+| | `total_borrow_assets` | 90000 | 90000 |
+| | `total_borrow_shares` | 90000000000 | 90000000000 |
+| `0xdd89d343…` | all four | 500000 / 500000000000 / 500000 / 500000000000 | identical |
+
+(Ethereum, block 25,905,044.) Both packages were also streamed from their
+published `spkg.io` artifacts rather than local builds. MetaMorpho decoding was
+checked against a real vault creation — "MEV Capital M^0 Vault" / `MC.wM` at
+block 20,873,628 — and matches the Morpho API exactly.
+
+**What is NOT exercised:** the `AccrueInterest` fee-share path. It is
+implemented and documented above, but **no market currently has a non-zero
+fee** (0 of 300 Ethereum markets sampled via the Morpho API), so `feeShares` is
+always 0 and the branch never fires against live data. It exists because
+governance can enable a fee up to `MAX_FEE` (25%) at any time, at which point an
+indexer without it silently gets the fee recipient's balance wrong forever.
+Treat that path as defensive, not battle-tested.
+
+Full-history backfill totals are also unverified — backfill from block 18883124
+exceeds the free tier's 10,000-block limit, which is why the checks above use
+recently created markets instead.
 
 ## License
 
