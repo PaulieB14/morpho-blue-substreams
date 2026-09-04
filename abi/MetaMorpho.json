@@ -1,0 +1,23 @@
+[
+  { "type": "event", "name": "Deposit", "anonymous": false,
+    "inputs": [
+      { "indexed": true,  "name": "sender", "type": "address" },
+      { "indexed": true,  "name": "owner",  "type": "address" },
+      { "indexed": false, "name": "assets", "type": "uint256" },
+      { "indexed": false, "name": "shares", "type": "uint256" }
+    ] },
+  { "type": "event", "name": "Withdraw", "anonymous": false,
+    "inputs": [
+      { "indexed": true,  "name": "sender",   "type": "address" },
+      { "indexed": true,  "name": "receiver", "type": "address" },
+      { "indexed": true,  "name": "owner",    "type": "address" },
+      { "indexed": false, "name": "assets",   "type": "uint256" },
+      { "indexed": false, "name": "shares",   "type": "uint256" }
+    ] },
+  { "type": "event", "name": "Transfer", "anonymous": false,
+    "inputs": [
+      { "indexed": true,  "name": "from",  "type": "address" },
+      { "indexed": true,  "name": "to",    "type": "address" },
+      { "indexed": false, "name": "value", "type": "uint256" }
+    ] }
+]

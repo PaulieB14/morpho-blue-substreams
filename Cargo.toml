@@ -1,0 +1,30 @@
+[package]
+name = "morpho_blue_paulie"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/PaulieB14/morpho-blue-substreams"
+description = "Morpho Blue + MetaMorpho stores, positions and upsert SQL, composed on StreamingFast's event decoder"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.7"
+substreams-ethereum = "0.11"
+substreams-database-change = "4"
+prost = "0.13"
+hex = "0.4"
+hex-literal = "0.4"
+ethabi = "18"
+num-bigint = "0.4"
+
+[build-dependencies]
+substreams-ethereum = "0.11"
+
+[profile.release]
+lto = true
+opt-level = 's'
+strip = "debuginfo"
+panic = "abort"
+codegen-units = 1

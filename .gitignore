@@ -2,6 +2,14 @@
 **/*.rs.bk
 .DS_Store
 *.spkg
+!vendor/*.spkg
 .substreams*
 /src/pb/*.rs
 !/src/pb/mod.rs
+/src/abi/*.rs
+!/src/abi/mod.rs
+/src/pb/.last_generated_hash
+substreams.*.yaml
+!substreams.yaml
+!substreams.base.yaml
+buf.gen.yaml

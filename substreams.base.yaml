@@ -1,10 +1,11 @@
+# GENERATED from substreams.yaml by `make base-manifest` — edit that file, not this one.
 specVersion: v0.1.0
 
 package:
-  name: morpho_blue_paulie
+  name: morpho_blue_paulie_base
   version: v0.1.0
   description: >
-    Morpho Blue + MetaMorpho Substreams. Composes StreamingFast's
+    Morpho Blue + MetaMorpho Substreams for BASE. Composes StreamingFast's
     morpho-blue-substreams map_events for the Blue event tape, then adds what
     that package does not have: market params, market totals, per-user
     positions, MetaMorpho vault indexing, and an upsert SQL db_out shaped like
@@ -17,10 +18,10 @@ imports:
   # StreamingFast's decoder is NOT on the Substreams registry (only source, in
   # streamingfast/substreams-chain-modules). We vendor a build of it so this
   # package is self-contained; `make vendor` regenerates it from source.
-  morpho_sf: ./vendor/morpho-blue-substreams-v0.1.0.spkg
+  morpho_sf: ./vendor/morpho-blue-substreams-base-v0.1.0.spkg
   database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
 
-network: mainnet
+network: base
 
 protobuf:
   files:
@@ -43,7 +44,7 @@ modules:
       Decodes the Morpho Blue admin events the upstream decoder omits:
       SetFeeRecipient, SetFee, EnableIrm, EnableLltv and SetOwner.
     kind: map
-    initialBlock: 18883124
+    initialBlock: 13977148
     inputs:
       - source: sf.ethereum.type.v2.Block
     output:
@@ -54,7 +55,7 @@ modules:
       Current protocol fee recipient, keyed `fee_recipient`. Written at the
       event's log index so consumers can resolve it at a precise ordinal.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: set
     valueType: string
     inputs:
@@ -65,7 +66,7 @@ modules:
       Protocol owner and the enabled IRM / LLTV sets (`owner`, `irm:{address}`,
       `lltv:{value}`). Append-only — Morpho has no disable.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: set
     valueType: string
     inputs:
@@ -75,7 +76,7 @@ modules:
     doc: >
       Per-market fee in WAD, keyed `fee:{market_id}`.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: set
     valueType: string
     inputs:
@@ -87,7 +88,7 @@ modules:
       The immutable 5-tuple per market (loan token, collateral token, oracle,
       IRM, LLTV), keyed `mkt:{market_id}:params`.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: set
     valueType: proto:morpho_paulie.v1.MarketParams
     inputs:
@@ -98,7 +99,7 @@ modules:
       Running supply/borrow assets and shares plus total collateral per market.
       Applies interest accrual and socialized bad debt in true log order.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -112,7 +113,7 @@ modules:
       `pos:{market_id}:{user}:{field}`. Credits the silent AccrueInterest fee-share
       mint to the fee recipient in effect at that ordinal.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -125,7 +126,7 @@ modules:
     doc: >
       CreateMetaMorpho events from the MetaMorpho V1 and V1.1 factories.
     kind: map
-    initialBlock: 18883124
+    initialBlock: 13977148
     inputs:
       - source: sf.ethereum.type.v2.Block
     output:
@@ -136,7 +137,7 @@ modules:
       Vault metadata (asset, name, symbol, factory, initial owner) keyed
       `vault:{address}`.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: set
     valueType: proto:morpho_paulie.v1.VaultMeta
     inputs:
@@ -148,7 +149,7 @@ modules:
       actually created — these are generic ERC-4626/ERC-20 signatures, so the vault
       store is what makes them Morpho-specific.
     kind: map
-    initialBlock: 18883124
+    initialBlock: 13977148
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_vaults
@@ -162,7 +163,7 @@ modules:
       Per-user vault share balances from mint/burn/transfer, keyed
       `vpos:{vault}:{user}`.
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -173,7 +174,7 @@ modules:
       Vault share supply (exact) and net deposited assets (principal only —
       excludes interest earned in the underlying Blue markets).
     kind: store
-    initialBlock: 18883124
+    initialBlock: 13977148
     updatePolicy: add
     valueType: bigint
     inputs:
@@ -185,7 +186,7 @@ modules:
       Upsert DatabaseChanges for markets, market_states, positions, vaults,
       vault_positions, vault_states and blue_config. Pair with schema.sql.
     kind: map
-    initialBlock: 18883124
+    initialBlock: 13977148
     inputs:
       - source: sf.substreams.v1.Clock
       - store: store_market_params

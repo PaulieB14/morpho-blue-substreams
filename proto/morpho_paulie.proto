@@ -2,13 +2,102 @@ syntax = "proto3";
 
 package morpho_paulie.v1;
 
-// Typed MetaMorpho / vault events — one message type per event (fill fields in implementation).
+// ─────────────────────────────────────────────────────────────────────────────
+// Morpho Blue admin events.
+//
+// StreamingFast's morpho-blue-substreams map_events does NOT decode these, but
+// SetFeeRecipient is load-bearing: AccrueInterest mints feeShares straight into
+// the fee recipient's supply position with no Supply event to observe.
+// See docs/MORPHO_BLUE_ACCOUNTING.md.
+// ─────────────────────────────────────────────────────────────────────────────
+
+message BlueAdminEvents {
+  repeated SetFeeRecipient fee_recipients = 1;
+  repeated SetFee fees = 2;
+  repeated EnableIrm enabled_irms = 3;
+  repeated EnableLltv enabled_lltvs = 4;
+  repeated SetOwner owners = 5;
+}
+
+message SetFeeRecipient {
+  string new_fee_recipient = 1;
+  string tx_hash = 2;
+  uint64 log_index = 3;
+  uint64 block_num = 4;
+  uint64 timestamp = 5;
+}
+
+message SetFee {
+  string market_id = 1;
+  string new_fee = 2;
+  string tx_hash = 3;
+  uint64 log_index = 4;
+  uint64 block_num = 5;
+  uint64 timestamp = 6;
+}
+
+message EnableIrm {
+  string irm = 1;
+  string tx_hash = 2;
+  uint64 log_index = 3;
+  uint64 block_num = 4;
+  uint64 timestamp = 5;
+}
+
+message EnableLltv {
+  string lltv = 1;
+  string tx_hash = 2;
+  uint64 log_index = 3;
+  uint64 block_num = 4;
+  uint64 timestamp = 5;
+}
+
+message SetOwner {
+  string new_owner = 1;
+  string tx_hash = 2;
+  uint64 log_index = 3;
+  uint64 block_num = 4;
+  uint64 timestamp = 5;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Market params — the 5-tuple whose keccak256 is the market id.
+// ─────────────────────────────────────────────────────────────────────────────
+
+message MarketParams {
+  string market_id = 1;
+  string loan_token = 2;
+  string collateral_token = 3;
+  string oracle = 4;
+  string irm = 5;
+  string lltv = 6;
+  uint64 created_block = 7;
+  string created_tx = 8;
+  uint64 created_timestamp = 9;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MetaMorpho (ERC-4626 vaults over Blue markets). Not covered by the SF pack.
+// ─────────────────────────────────────────────────────────────────────────────
 
 message MetaMorphoEvents {
   repeated VaultCreated vaults_created = 1;
   repeated VaultDeposit deposits = 2;
   repeated VaultWithdraw withdraws = 3;
   repeated VaultTransfer transfers = 4;
+}
+
+message VaultMeta {
+  string vault = 1;
+  string asset = 2;
+  string name = 3;
+  string symbol = 4;
+  string factory = 5;
+  string initial_owner = 6;
+  string initial_timelock = 7;
+  uint64 created_block = 8;
+  string created_tx = 9;
+  uint64 created_timestamp = 10;
 }
 
 message VaultCreated {
@@ -22,6 +111,8 @@ message VaultCreated {
   uint64 log_index = 8;
   uint64 block_num = 9;
   uint64 timestamp = 10;
+  string initial_owner = 11;
+  string initial_timelock = 12;
 }
 
 message VaultDeposit {

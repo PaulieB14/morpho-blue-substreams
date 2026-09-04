@@ -1,0 +1,13 @@
+[
+  { "type": "event", "name": "SetOwner", "anonymous": false,
+    "inputs": [ { "indexed": true, "name": "newOwner", "type": "address" } ] },
+  { "type": "event", "name": "SetFeeRecipient", "anonymous": false,
+    "inputs": [ { "indexed": true, "name": "newFeeRecipient", "type": "address" } ] },
+  { "type": "event", "name": "SetFee", "anonymous": false,
+    "inputs": [ { "indexed": true, "name": "id", "type": "bytes32" },
+                { "indexed": false, "name": "newFee", "type": "uint256" } ] },
+  { "type": "event", "name": "EnableIrm", "anonymous": false,
+    "inputs": [ { "indexed": true, "name": "irm", "type": "address" } ] },
+  { "type": "event", "name": "EnableLltv", "anonymous": false,
+    "inputs": [ { "indexed": false, "name": "lltv", "type": "uint256" } ] }
+]

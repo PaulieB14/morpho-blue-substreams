@@ -1,58 +1,138 @@
-# morpho-blue-substreams (PaulieB14)
+# Morpho Blue + MetaMorpho Substreams
 
-Composable **Morpho Blue + MetaMorpho** Substreams for Ethereum mainnet.
+Event-sourced **market state, user positions and MetaMorpho vault balances** for
+[Morpho Blue](https://github.com/morpho-org/morpho-blue) on Ethereum mainnet,
+emitted as upsert SQL you can sink into your own database.
 
-## Lego architecture
+<img src="assets/icon.png" width="72" align="right" alt="Substreams" />
 
-We **do not fork** StreamingFast’s Blue decoder. We **import** it and stack product modules on top:
+## What this is
 
-| Layer | Source | What you get |
+StreamingFast already ships a Morpho Blue **event decoder**. This package does
+not fork it — it *imports* it and spends its modules on the layer that decoder
+does not have:
+
+| | StreamingFast `morpho-blue-substreams` | this package |
 | --- | --- | --- |
-| Blue events | `morpho-blue-substreams@v0.1.0` → `morpho_sf:map_events` | CreateMarket, Supply/Borrow/…, Liquidate, AccrueInterest, FlashLoan |
-| Stores + MetaMorpho + upsert SQL | **this package** | market params/totals, user positions, MetaMorpho vaults/shares, `db_out` |
+| Blue event tape | ✅ `map_events` | imported, not reimplemented |
+| Admin events (`SetFee`, `SetFeeRecipient`, `EnableIrm`, …) | ❌ | ✅ `map_blue_admin` + `store_blue_config` |
+| Market params / totals | ❌ | ✅ stores |
+| Per-user positions | ❌ | ✅ `store_positions` |
+| MetaMorpho vaults | ❌ | ✅ factory + vault share tracking |
+| SQL output | append-only event tables | **upsert** current-state tables |
 
-```text
-morpho_sf:map_events ──► store_market_params
-                     ├──► store_positions (+ market totals)
-                     └──► (optional raw event tables)
+## Module graph
 
-Block ──► map_metamorpho_events ──► store_vaults / store_vault_positions
-
-stores ──► db_out (upserts)
+```
+                        ┌─ store_market_params ─┐
+morpho_sf:map_events ───┼─ store_market_totals ─┤
+                        └─ store_positions ─────┤
+                                 ▲              │
+map_blue_admin ─→ store_fee_recipient           ├─→ db_out ─→ DatabaseChanges
+              ├─→ store_market_fee ─────────────┤
+              └─→ store_blue_config ────────────┤
+                                                │
+map_metamorpho_factory ─→ store_vaults ─┐       │
+                                        ▼       │
+                        map_metamorpho_events ──┤
+                                 ├─→ store_vault_positions
+                                 └─→ store_vault_totals
 ```
 
-StreamingFast stub alone is an append-only event dump ([registry](https://substreams.dev/packages/morpho-blue-substreams/v0.1.0)). This pack targets Morpho API–like shapes: [markets, state, positions, vaults](https://docs.morpho.org/developers/api/morpho/).
+## Correctness notes
 
-## Status
+Three things make event-sourced Morpho accounting easy to get wrong. All are
+handled here, and all are documented in
+[`docs/MORPHO_BLUE_ACCOUNTING.md`](docs/MORPHO_BLUE_ACCOUNTING.md).
 
-Implementation brief: [`docs/CLAUDE_BRIEF.md`](docs/CLAUDE_BRIEF.md).
+1. **Events must be replayed in log order.** The upstream `Events` message groups
+   events *by type*. Iterating field-by-field can apply an `AccrueInterest` after
+   a `Supply` that actually came later in the same transaction — on-chain,
+   interest always accrues first. Every store here merge-sorts on `log_index`
+   before applying anything.
 
-Blue accounting deep-dive (from [morpho-org/morpho-blue](https://github.com/morpho-org/morpho-blue)): [`docs/MORPHO_BLUE_ACCOUNTING.md`](docs/MORPHO_BLUE_ACCOUNTING.md) — fee-share landmine, bad debt, virtual shares, health.
+2. **Fee shares are minted silently.** `AccrueInterest` credits `feeShares`
+   straight into the fee recipient's supply position and emits **no** `Supply`
+   event (`EventsLib` says so explicitly). The upstream decoder does not decode
+   `SetFeeRecipient`, so this package adds `map_blue_admin` and reads the
+   recipient *at the accrual's own ordinal* — a `SetFeeRecipient` later in the
+   same block must not be applied retroactively.
 
-Rust WASM modules are next (hand the brief to Claude if Cloud Agents / Pro aren’t available).
+3. **Bad debt is socialized.** On `Liquidate` with bad debt, the loss comes off
+   `totalBorrowAssets` **and** `totalSupplyAssets`, and the borrower's remaining
+   borrow shares are zeroed. Suppliers eat it.
 
-## Contracts (Ethereum)
+Values are raw on-chain integers. Shares are **not** assets — convert with
+Morpho's virtual-share math (`VIRTUAL_SHARES = 1e6`, `VIRTUAL_ASSETS = 1`)
+against the matching `market_states` row.
 
-| Contract | Address |
-| --- | --- |
-| Morpho Blue | `0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb` |
-| MetaMorpho Factory V1.1 | `0x1897A8997241C1cD4bD0698647e4EB7213535c24` |
-| MetaMorpho Factory (old) | `0xA9c3D3a366466Fa809d1Ae982Fb2c46E5fC41101` |
+## Build and run
 
-Initial block: `18883124` (Blue deploy).
-
-## Develop
+The upstream decoder is **not published to the Substreams registry** (it only
+exists as source in `streamingfast/substreams-chain-modules`), so a build of it
+is vendored at `vendor/` to keep this package self-contained.
+`make vendor` regenerates it from source.
 
 ```bash
-substreams info morpho-blue-substreams@v0.1.0   # confirm import target
-# after implementation:
-substreams build
-substreams run . db_out -e mainnet.eth.streamingfast.io:443 --start-block 18883124 --stop-block +50
+make build          # cargo build --target wasm32-unknown-unknown --release
+make pack           # -> morpho-blue-paulie-v0.1.0.spkg
+make stale          # guard: fails if the .wasm is older than src/
+
+substreams run morpho-blue-paulie-v0.1.0.spkg db_out \
+  -e mainnet.eth.streamingfast.io:443 --start-block 18883124 --stop-block +1000
 ```
 
-Auth: `substreams auth` / [thegraph.market](https://thegraph.market).
+> `substreams pack` does **not** compile. It packages whatever `.wasm` sits at
+> the manifest path, so always `make build` first — `make stale` catches it.
 
-## Not doing
+Sink the output with
+[substreams-sink-sql](https://github.com/streamingfast/substreams-sink-sql)
+against [`schema.sql`](schema.sql). Numeric columns default to `0` because
+`db_out` emits only the columns that changed in a block.
 
-- Large PR into StreamingFast monorepo for stores/MetaMorpho (optional tiny PR later for missing Blue admin events only)
-- Base network in v0.1 (SF import is `mainnet`; Base is a follow-up pack or params variant)
+## Tables
+
+| table | key | holds |
+| --- | --- | --- |
+| `markets` | `market_id` | the 5-tuple: loan/collateral token, oracle, IRM, LLTV |
+| `market_states` | `market_id` | supply/borrow assets and shares, collateral, fee |
+| `positions` | `{market_id}:{user}` | `supply_shares`, `borrow_shares`, `collateral` |
+| `vaults` | vault address | MetaMorpho name, symbol, asset, factory |
+| `vault_positions` | `{vault}:{user}` | vault share balance |
+| `vault_states` | vault address | `total_shares` (exact), `net_deposited_assets` |
+| `blue_config` | `owner` / `irm:…` / `lltv:…` | protocol owner and enabled IRM/LLTV sets |
+
+## Scope
+
+**In:** Ethereum mainnet, Morpho Blue from block 18883124, MetaMorpho factories
+V1.1 (`0x1897A899…`) and V1 (`0xA9c3D3a3…`).
+
+**Not yet:** USD prices, APYs and rewards (use the
+[Morpho API](https://docs.morpho.org/developers/api/morpho/) — it already does
+these well); live health factors, which need an oracle `price()` read at 1e36
+scale — `positions` + `market_states` + `lltv` + the oracle address are emitted
+so a consumer can join prices themselves; Vault V2; other chains (see below).
+
+Note `vault_states.net_deposited_assets` is deposit principal, **not** AUM — a
+vault also earns interest in the underlying Blue markets, which emits no
+vault-level event. For true AUM, join the vault's own rows in `positions`.
+
+### Other chains
+
+Morpho Blue is deployed at the same address on Base and elsewhere, but a
+Substreams package is pinned to one `network:`, and the vendored upstream
+decoder is mainnet-only. Base support means a second manifest plus a Base build
+of the decoder — same Rust crate, no handler changes. Tracked as follow-up.
+
+## Verification
+
+Validated against mainnet at block 21,000,000 and at real vault-creation blocks:
+markets, positions and vault events decode and accumulate, and vault metadata
+matches the Morpho API exactly (e.g. `MC.wM` / "MEV Capital M^0 Vault" at block
+20,873,628). Absolute totals across a full backfill are **not** yet verified —
+that needs a paid endpoint, since store backfill from block 18883124 exceeds the
+free tier's 10,000-block limit.
+
+## License
+
+MIT
