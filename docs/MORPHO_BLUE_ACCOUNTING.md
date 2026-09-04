@@ -201,3 +201,19 @@ Cleanest pattern:
 3. `store_positions` / `store_market_totals` consume those deltas
 
 That keeps SF as the Blue **tape** lego and our code as the **accounting brain**.
+
+## SF Events proto ordering (lego hazard)
+
+StreamingFast `map_events` outputs `morpho_blue.types.v1.Events` with **separate repeated fields per type** (`supplies`, `borrows`, `accrued_interests`, …). Iterating field-by-field loses interleaving.
+
+**Required:** merge all event lists and sort by `(block_num, log_index)` (and tx order if needed) before applying deltas. Within one tx, Morpho always accrues **before** the user op, so `AccrueInterest` must be applied **before** the paired Supply/Borrow/… at higher log index.
+
+Also: each SF event message already carries `log_index` / `block_num` / `tx_hash` — use them.
+
+## Extra edge cases (from Morpho.sol)
+
+1. **SupplyCollateral does not accrue** — only collateral increases; TBA/TSA can be stale until a later accruing op (liquidate/borrow/… will accrue first).
+2. **IRM zero:** if `elapsed > 0` but `irm == address(0)`, `_accrueInterest` advances `lastUpdate` **without** emitting `AccrueInterest` — rare; lastUpdate in event-sourced state can drift from chain for that market until an eventful accrue.
+3. **Rounding cheat sheet:** supply assets→sharesDown / shares→assetsUp; withdraw assets→sharesUp / shares→assetsDown; borrow like withdraw; repay like supply (`Morpho.sol`).
+4. **Live vs stored:** event stores match **storage after last accrual**. For “expected” balances with pending interest, need IRM `borrowRateView` + elapsed (`MorphoBalancesLib`) — out of scope for pure event stores; document the difference.
+5. **Callbacks / reentrancy:** multiple Morpho events in one tx — again, sort by log_index.

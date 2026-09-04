@@ -29,6 +29,7 @@ Study and follow **[`MORPHO_BLUE_ACCOUNTING.md`](./MORPHO_BLUE_ACCOUNTING.md)** 
 
 Non-negotiable correctness rules:
 
+0. **Merge-sort SF Events by `(block_num, log_index)`** — SF buckets by type; applying field-by-field can run AccrueInterest *after* Supply in the same tx.
 1. **Fee shares are silent** — `AccrueInterest.feeShares` mint to current `feeRecipient` with **no** `Supply` event (`EventsLib` warning). Track `feeRecipient` via our own `map_blue_admin` (`SetFeeRecipient`); apply fee shares into that address’s supply position.
 2. **Bad debt socializes to suppliers** — on `Liquidate`, subtract `bad_debt_assets` from **both** `totalBorrowAssets` and `totalSupplyAssets`.
 3. **Virtual shares** — `VIRTUAL_SHARES=1e6`, `VIRTUAL_ASSETS=1` when converting shares↔assets for API/HF views; borrows use `toAssetsUp`.
