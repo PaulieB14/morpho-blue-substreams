@@ -11,8 +11,13 @@ emitted as upsert SQL you can sink into your own database.
 [`morpho-blue-paulie-base`](https://substreams.dev/packages/morpho-blue-paulie-base/v0.1.0) (Base)
 
 ```bash
-substreams gui morpho-blue-paulie@v0.1.0            # Ethereum
-substreams gui morpho-blue-paulie-base@v0.1.0       # Base
+# Direct artifact URLs — these always work
+substreams gui https://spkg.io/v1/packages/morpho-blue-paulie/v0.1.0        # Ethereum
+substreams gui https://spkg.io/v1/packages/morpho-blue-paulie-base/v0.1.0   # Base
+
+# Short names, once the registry finishes indexing them
+substreams gui morpho-blue-paulie@v0.1.0
+substreams gui morpho-blue-paulie-base@v0.1.0
 ```
 
 ## What this is
