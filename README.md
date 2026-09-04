@@ -6,6 +6,15 @@ emitted as upsert SQL you can sink into your own database.
 
 <img src="assets/icon.png" width="72" align="right" alt="Substreams" />
 
+**Published:**
+[`morpho-blue-paulie`](https://substreams.dev/packages/morpho-blue-paulie/v0.1.0) (Ethereum) ·
+[`morpho-blue-paulie-base`](https://substreams.dev/packages/morpho-blue-paulie-base/v0.1.0) (Base)
+
+```bash
+substreams gui morpho-blue-paulie@v0.1.0            # Ethereum
+substreams gui morpho-blue-paulie-base@v0.1.0       # Base
+```
+
 ## What this is
 
 StreamingFast already ships a Morpho Blue **event decoder**. This package does
@@ -117,12 +126,31 @@ Note `vault_states.net_deposited_assets` is deposit principal, **not** AUM — a
 vault also earns interest in the underlying Blue markets, which emits no
 vault-level event. For true AUM, join the vault's own rows in `positions`.
 
-### Other chains
+### Networks
 
-Morpho Blue is deployed at the same address on Base and elsewhere, but a
-Substreams package is pinned to one `network:`, and the vendored upstream
-decoder is mainnet-only. Base support means a second manifest plus a Base build
-of the decoder — same Rust crate, no handler changes. Tracked as follow-up.
+A Substreams package is pinned to a single `network:`, so this repo ships two
+manifests from one Rust crate:
+
+| | Ethereum | Base |
+| --- | --- | --- |
+| manifest | `substreams.yaml` | `substreams.base.yaml` (generated) |
+| package | `morpho_blue_paulie` | `morpho_blue_paulie_base` |
+| Morpho Blue | `0xBBBB…FFCb` | same address |
+| initial block | 18883124 | 13977148 |
+| MetaMorpho factories | `0x1897A899…`, `0xA9c3D3a3…` | `0xFf62A7c2…`, `0xA9c3D3a3…` |
+
+The Base initial block was found by binary-searching `eth_getCode` against the
+Blue address, not taken from a doc. All known factories are checked on both
+chains — an address that is not a factory on a given chain simply never emits
+`CreateMetaMorpho`.
+
+Regenerate the Base manifest with `make base-manifest`; it is derived from
+`substreams.yaml` so the two cannot drift. Build both with
+`make pack && make pack-base`.
+
+Other Morpho deployments (Arbitrum, Polygon, Unichain, …) follow the same
+recipe: repack the vendored decoder for that network, add the factory address,
+generate a manifest.
 
 ## Verification
 
