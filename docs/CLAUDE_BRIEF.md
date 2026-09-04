@@ -23,6 +23,26 @@ Verify anytime:
 substreams info morpho-blue-substreams@v0.1.0
 ```
 
+## MUST READ: Blue accounting
+
+Study and follow **[`MORPHO_BLUE_ACCOUNTING.md`](./MORPHO_BLUE_ACCOUNTING.md)** (derived from [morpho-org/morpho-blue](https://github.com/morpho-org/morpho-blue)).
+
+Non-negotiable correctness rules:
+
+1. **Fee shares are silent** — `AccrueInterest.feeShares` mint to current `feeRecipient` with **no** `Supply` event (`EventsLib` warning). Track `feeRecipient` via our own `map_blue_admin` (`SetFeeRecipient`); apply fee shares into that address’s supply position.
+2. **Bad debt socializes to suppliers** — on `Liquidate`, subtract `bad_debt_assets` from **both** `totalBorrowAssets` and `totalSupplyAssets`.
+3. **Virtual shares** — `VIRTUAL_SHARES=1e6`, `VIRTUAL_ASSETS=1` when converting shares↔assets for API/HF views; borrows use `toAssetsUp`.
+4. **Health** — `maxBorrow = collateral * oraclePrice / 1e36 * lltv`; healthy iff `maxBorrow >= borrowShares.toAssetsUp(...)`. Oracle scale is **1e36**.
+5. Still **import** SF `map_events` for the high-volume tape; add a thin **`map_blue_admin`** for `SetFee`, `SetFeeRecipient`, `EnableIrm`, `EnableLltv`, `SetOwner` (SF stub omits these). Prefer enrich → stores over forking SF decode.
+
+Recommended graph tweak:
+
+```
+morpho_sf:map_events ──┐
+map_blue_admin ────────┼─► map_position_deltas (join feeRecipient) ─► store_positions / store_market_totals
+                       └─► store_market_params (CreateMarket)
+```
+
 ## Manifest pattern (required)
 
 ```yaml

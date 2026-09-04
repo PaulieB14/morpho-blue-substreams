@@ -15,6 +15,11 @@ imports:
 
 network: mainnet
 
+# Accounting note (see docs/MORPHO_BLUE_ACCOUNTING.md):
+# SF map_events omits SetFeeRecipient — implement map_blue_admin + join before store_positions
+# so AccrueInterest feeShares credit the correct feeRecipient supply position.
+
+
 # Modules are implemented in Rust — see docs/CLAUDE_BRIEF.md.
 # Placeholder graph so the import lego is explicit; replace stubs when coding.
 

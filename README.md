@@ -25,7 +25,9 @@ StreamingFast stub alone is an append-only event dump ([registry](https://substr
 
 ## Status
 
-Scaffold + full implementation brief for Claude/Cursor: [`docs/CLAUDE_BRIEF.md`](docs/CLAUDE_BRIEF.md).
+Implementation brief: [`docs/CLAUDE_BRIEF.md`](docs/CLAUDE_BRIEF.md).
+
+Blue accounting deep-dive (from [morpho-org/morpho-blue](https://github.com/morpho-org/morpho-blue)): [`docs/MORPHO_BLUE_ACCOUNTING.md`](docs/MORPHO_BLUE_ACCOUNTING.md) — fee-share landmine, bad debt, virtual shares, health.
 
 Rust WASM modules are next (hand the brief to Claude if Cloud Agents / Pro aren’t available).
 
