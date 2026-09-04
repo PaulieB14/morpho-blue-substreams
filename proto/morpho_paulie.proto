@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package morpho_paulie.v1;
+
+// Typed MetaMorpho / vault events — one message type per event (fill fields in implementation).
+
+message MetaMorphoEvents {
+  repeated VaultCreated vaults_created = 1;
+  repeated VaultDeposit deposits = 2;
+  repeated VaultWithdraw withdraws = 3;
+  repeated VaultTransfer transfers = 4;
+}
+
+message VaultCreated {
+  string id = 1;
+  string vault = 2;
+  string asset = 3;
+  string name = 4;
+  string symbol = 5;
+  string factory = 6;
+  string tx_hash = 7;
+  uint64 log_index = 8;
+  uint64 block_num = 9;
+  uint64 timestamp = 10;
+}
+
+message VaultDeposit {
+  string id = 1;
+  string vault = 2;
+  string sender = 3;
+  string owner = 4;
+  string assets = 5;
+  string shares = 6;
+  string tx_hash = 7;
+  uint64 log_index = 8;
+  uint64 block_num = 9;
+  uint64 timestamp = 10;
+}
+
+message VaultWithdraw {
+  string id = 1;
+  string vault = 2;
+  string sender = 3;
+  string receiver = 4;
+  string owner = 5;
+  string assets = 6;
+  string shares = 7;
+  string tx_hash = 8;
+  uint64 log_index = 9;
+  uint64 block_num = 10;
+  uint64 timestamp = 11;
+}
+
+message VaultTransfer {
+  string id = 1;
+  string vault = 2;
+  string from_address = 3;
+  string to_address = 4;
+  string shares = 5;
+  string tx_hash = 6;
+  uint64 log_index = 7;
+  uint64 block_num = 8;
+  uint64 timestamp = 9;
+}

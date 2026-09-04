@@ -1,0 +1,70 @@
+specVersion: v0.1.0
+
+package:
+  name: morpho_blue_paulie
+  version: v0.1.0
+  description: >
+    Morpho Blue + MetaMorpho Substreams (PaulieB14). Composes StreamingFast
+    morpho-blue-substreams@v0.1.0 map_events, then adds market/position stores,
+    MetaMorpho vault indexing, and upsert SQL db_out.
+  url: https://github.com/PaulieB14/morpho-blue-substreams
+
+imports:
+  morpho_sf: morpho-blue-substreams@v0.1.0
+  database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
+
+network: mainnet
+
+# Modules are implemented in Rust — see docs/CLAUDE_BRIEF.md.
+# Placeholder graph so the import lego is explicit; replace stubs when coding.
+
+protobuf:
+  files:
+    - morpho_paulie.proto
+  importPaths:
+    - ./proto
+  excludePaths:
+    - sf/substreams
+    - google
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ./target/wasm32-unknown-unknown/release/morpho_blue_paulie.wasm
+
+modules:
+  - name: store_market_params
+    kind: store
+    initialBlock: 18883124
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: morpho_sf:map_events
+
+  - name: store_positions
+    kind: store
+    initialBlock: 18883124
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: morpho_sf:map_events
+
+  - name: map_metamorpho_events
+    kind: map
+    initialBlock: 18883124
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:morpho_paulie.v1.MetaMorphoEvents
+
+  - name: db_out
+    kind: map
+    initialBlock: 18883124
+    inputs:
+      - store: store_market_params
+        mode: deltas
+      - store: store_positions
+        mode: deltas
+      - map: map_metamorpho_events
+    output:
+      type: proto:sf.substreams.sink.database.v1.DatabaseChanges

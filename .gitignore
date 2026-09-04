@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+.DS_Store
+*.spkg
+.substreams*
+/src/pb/*.rs
+!/src/pb/mod.rs
