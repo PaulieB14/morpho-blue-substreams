@@ -8,3 +8,6 @@ pub mod metamorpho_factory;
 #[rustfmt::skip]
 #[allow(clippy::all, dead_code, unused_imports)]
 pub mod metamorpho;
+#[rustfmt::skip]
+#[allow(clippy::all, dead_code, unused_imports)]
+pub mod morpho_oracle;

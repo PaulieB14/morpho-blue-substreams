@@ -2,7 +2,7 @@ specVersion: v0.1.0
 
 package:
   name: morpho_blue_paulie
-  version: v0.1.0
+  version: v0.2.0
   description: >
     Morpho Blue + MetaMorpho Substreams. Composes StreamingFast's
     morpho-blue-substreams map_events for the Blue event tape, then adds what
@@ -179,6 +179,60 @@ modules:
     inputs:
       - map: map_metamorpho_events
 
+  - name: map_position_risk
+    doc: >
+      Per-position health factor priced with the market's own oracle (read over
+      RPC at 1e36 scale), plus the liquidation economics: seizable collateral
+      and the liquidation incentive factor. Health factor is also on the Morpho
+      API; the liquidation economics are not.
+    kind: map
+    initialBlock: 18883124
+    inputs:
+      - source: sf.substreams.v1.Clock
+      - map: morpho_sf:map_events
+      - store: store_market_params
+        mode: get
+      - store: store_market_totals
+        mode: get
+      - store: store_positions
+        mode: get
+    output:
+      type: proto:morpho_paulie.v1.PositionRisks
+
+  - name: store_liquidatable
+    doc: >
+      Currently-known liquidatable positions, keyed `liq:{market_id}:{user}`.
+      Only re-priced when an event touches the position, so a purely
+      price-driven move into liquidation is not seen until the next touch.
+    kind: store
+    initialBlock: 18883124
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_position_risk
+
+  - name: map_bad_debt
+    doc: >
+      Bad debt attributed to the borrower that produced it. The Morpho API
+      reports bad debt per market only.
+    kind: map
+    initialBlock: 18883124
+    inputs:
+      - map: morpho_sf:map_events
+    output:
+      type: proto:morpho_paulie.v1.BadDebtEvents
+
+  - name: store_bad_debt
+    doc: >
+      Cumulative realized bad debt per market and per borrower, including a
+      per-borrower incident count.
+    kind: store
+    initialBlock: 18883124
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_bad_debt
+
   # ── SQL ───────────────────────────────────────────────────────────────────
   - name: db_out
     doc: >
@@ -203,6 +257,10 @@ modules:
       - store: store_market_fee
         mode: deltas
       - store: store_blue_config
+        mode: deltas
+      - store: store_bad_debt
+        mode: deltas
+      - store: store_liquidatable
         mode: deltas
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges

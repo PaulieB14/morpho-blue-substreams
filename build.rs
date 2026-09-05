@@ -5,6 +5,7 @@ fn main() {
         ("MorphoBlueAdmin", "abi/MorphoBlueAdmin.json", "src/abi/morpho_blue_admin.rs"),
         ("MetaMorphoFactory", "abi/MetaMorphoFactory.json", "src/abi/metamorpho_factory.rs"),
         ("MetaMorpho", "abi/MetaMorpho.json", "src/abi/metamorpho.rs"),
+        ("MorphoOracle", "abi/MorphoOracle.json", "src/abi/morpho_oracle.rs"),
     ] {
         println!("cargo:rerun-if-changed={}", abi);
         Abigen::new(name, abi)

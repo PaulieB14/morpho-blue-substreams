@@ -80,6 +80,39 @@ CREATE TABLE IF NOT EXISTS blue_config (
   updated_block  BIGINT
 );
 
+-- Known-liquidatable positions. NOTE: only refreshed when an event touches the
+-- position, so a purely price-driven move into liquidation is not reflected
+-- until the next touch. See store_liquidatable in src/lib.rs.
+CREATE TABLE IF NOT EXISTS liquidatable_positions (
+  id                 TEXT PRIMARY KEY,          -- {market_id}:{user}
+  market_id          TEXT NOT NULL DEFAULT '',
+  user_address       TEXT NOT NULL DEFAULT '',
+  health_factor_wad  NUMERIC NOT NULL DEFAULT 0,-- < 1e18 means underwater
+  updated_block      BIGINT
+);
+
+-- Cumulative realized bad debt per market.
+CREATE TABLE IF NOT EXISTS market_bad_debt (
+  id             TEXT PRIMARY KEY,              -- market_id
+  assets         NUMERIC NOT NULL DEFAULT 0,
+  shares         NUMERIC NOT NULL DEFAULT 0,
+  updated_block  BIGINT
+);
+
+-- Bad debt attributed to the borrower that produced it, with an incident count.
+-- The Morpho API reports bad debt per market only, so this view is not
+-- obtainable from it.
+CREATE TABLE IF NOT EXISTS borrower_bad_debt (
+  id             TEXT PRIMARY KEY,              -- {market_id}:{borrower}
+  market_id      TEXT NOT NULL DEFAULT '',
+  borrower       TEXT NOT NULL DEFAULT '',
+  assets         NUMERIC NOT NULL DEFAULT 0,
+  count          NUMERIC NOT NULL DEFAULT 0,
+  updated_block  BIGINT
+);
+
+CREATE INDEX IF NOT EXISTS liq_market_idx      ON liquidatable_positions (market_id);
+CREATE INDEX IF NOT EXISTS bad_debt_borrower_idx ON borrower_bad_debt (borrower);
 CREATE INDEX IF NOT EXISTS positions_market_idx ON positions (market_id);
 CREATE INDEX IF NOT EXISTS positions_user_idx   ON positions (user_address);
 CREATE INDEX IF NOT EXISTS vault_pos_vault_idx  ON vault_positions (vault);

@@ -153,3 +153,61 @@ message VaultTransfer {
   uint64 block_num = 8;
   uint64 timestamp = 9;
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Risk and liquidation.
+//
+// Health factor is also available from the Morpho API; it is here so it can be
+// streamed per block rather than polled. The liquidation economics below
+// (seizable collateral, incentive factor, liquidator profit) are NOT exposed by
+// the API and have to be derived from the contracts.
+// ─────────────────────────────────────────────────────────────────────────────
+
+message PositionRisks {
+  repeated PositionRisk risks = 1;
+}
+
+message PositionRisk {
+  string market_id = 1;
+  string user = 2;
+  string collateral = 3;
+  string borrow_shares = 4;
+  // borrowShares converted with toAssetsUp, matching how Morpho checks health.
+  string borrowed_assets = 5;
+  // IOracle.price(), ORACLE_PRICE_SCALE = 1e36.
+  string oracle_price = 6;
+  string lltv = 7;
+  string max_borrow = 8;
+  // maxBorrow * 1e18 / borrowed. Below 1e18 means liquidatable. Empty when
+  // the position has no debt.
+  string health_factor_wad = 9;
+  bool liquidatable = 10;
+  // Collateral a liquidator would seize repaying the full debt, capped at the
+  // position's collateral.
+  string seizable_collateral = 11;
+  // LIF, WAD. min(1.15e18, WAD / (WAD - 0.3e18 * (WAD - lltv))).
+  string liquidation_incentive_wad = 12;
+  uint64 block_num = 13;
+  uint64 timestamp = 14;
+}
+
+// Per-position bad debt attribution. The Morpho API reports bad debt at the
+// market level only, so it cannot tell you which borrower produced it.
+message BadDebtEvents {
+  repeated BadDebtEvent events = 1;
+}
+
+message BadDebtEvent {
+  string id = 1;
+  string market_id = 2;
+  string borrower = 3;
+  string liquidator = 4;
+  string bad_debt_assets = 5;
+  string bad_debt_shares = 6;
+  string seized_assets = 7;
+  string repaid_assets = 8;
+  string tx_hash = 9;
+  uint64 log_index = 10;
+  uint64 block_num = 11;
+  uint64 timestamp = 12;
+}

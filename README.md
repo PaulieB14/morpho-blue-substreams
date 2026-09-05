@@ -115,6 +115,43 @@ against [`schema.sql`](schema.sql). Numeric columns default to `0` because
 | `vault_positions` | `{vault}:{user}` | vault share balance |
 | `vault_states` | vault address | `total_shares` (exact), `net_deposited_assets` |
 | `blue_config` | `owner` / `irm:…` / `lltv:…` | protocol owner and enabled IRM/LLTV sets |
+| `liquidatable_positions` | `{market_id}:{user}` | known-underwater positions + health factor |
+| `market_bad_debt` | `market_id` | cumulative realized bad debt |
+| `borrower_bad_debt` | `{market_id}:{borrower}` | bad debt attributed to the borrower, with a count |
+
+## Versus the Morpho API
+
+Be clear-eyed about this: the [Morpho API](https://docs.morpho.org/developers/api/morpho/)
+is excellent and covers more than this package. It has USD values, APYs at eight
+timescales, rewards, oracle prices, PnL and ROE per position, `healthFactor`,
+`priceVariationToLiquidationPrice`, and bulk paging (59k positions at 1,000 a
+page, no rate limiting observed). For most consumers it is the right answer.
+
+What this adds:
+
+| | Morpho API | this package |
+| --- | --- | --- |
+| Market state, positions, vault shares | ✅ richer (USD, APY, PnL) | ✅ raw integers |
+| `healthFactor` | ✅ | ✅ streamed per block, not polled |
+| **Seizable collateral + liquidation incentive** | ❌ | ✅ `map_position_risk` |
+| **Bad debt per borrower** | ❌ market-level only | ✅ `borrower_bad_debt` |
+| Reorg undo signals | ❌ | ✅ inherent to Substreams |
+| Composable with other Substreams | ❌ | ✅ module imports |
+| You own the pipeline | ❌ | ✅ |
+
+The liquidation economics fall out of the contract math rather than the API:
+
+```
+LIF     = min(1.15e18, WAD / (WAD - 0.3e18 * (WAD - lltv)))
+seizable = borrowed.wMulDown(LIF).mulDivDown(1e36, oraclePrice)   // capped at collateral
+```
+
+`map_position_risk` reads `IOracle.price()` over RPC at 1e36 scale.
+**Caveat:** positions are only re-priced when an event touches them. A position
+that crosses into liquidation purely because the oracle moved is not seen until
+the next touch — re-pricing every open position every block would mean an RPC
+call per market per block. Treat `liquidatable_positions` as "known
+liquidatable as of last touch", not a complete real-time feed.
 
 ## Scope
 

@@ -1,0 +1,4 @@
+[
+  { "type": "function", "name": "price", "stateMutability": "view",
+    "inputs": [], "outputs": [ { "name": "", "type": "uint256" } ] }
+]

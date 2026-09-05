@@ -24,12 +24,14 @@ use substreams::errors::Error;
 use substreams::pb::substreams::Clock;
 use substreams::scalar::BigInt;
 use substreams::store::{
-    DeltaBigInt, DeltaProto, DeltaString, Deltas, StoreAdd, StoreAddBigInt, StoreGet,
-    StoreGetProto, StoreGetString, StoreNew, StoreSet, StoreSetProto, StoreSetString,
+    DeltaBigInt, DeltaProto, DeltaString, Deltas, StoreAdd, StoreAddBigInt, StoreDelete, StoreGet,
+    StoreGetBigInt, StoreGetProto, StoreGetString, StoreNew, StoreSet, StoreSetProto,
+    StoreSetString,
 };
 use substreams_database_change::pb::sf::substreams::sink::database::v1::DatabaseChanges;
 use substreams_database_change::tables::Tables;
 use substreams_ethereum::pb::eth::v2::Block;
+use substreams_ethereum::rpc::RpcBatch;
 use substreams_ethereum::Event;
 
 use crate::pb::morpho_blue::types::v1 as sf;
@@ -52,6 +54,17 @@ const MM_FACTORIES: [[u8; 20]; 3] = [
 
 /// Single global key: Blue has one fee recipient across all markets.
 const FEE_RECIPIENT_KEY: &str = "fee_recipient";
+
+// SharesMathLib / ConstantsLib, from morpho-org/morpho-blue.
+const VIRTUAL_SHARES: u64 = 1_000_000;
+const VIRTUAL_ASSETS: u64 = 1;
+/// IOracle.price() is quoted at 1e36, not 1e18.
+const ORACLE_PRICE_SCALE_EXP: u32 = 36;
+const WAD_EXP: u32 = 18;
+/// LIQUIDATION_CURSOR = 0.3e18
+const LIQUIDATION_CURSOR: u64 = 300_000_000_000_000_000;
+/// MAX_LIQUIDATION_INCENTIVE_FACTOR = 1.15e18
+const MAX_LIF: &str = "1150000000000000000";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // helpers
@@ -645,6 +658,260 @@ pub fn store_vault_totals(events: mp::MetaMorphoEvents, store: StoreAddBigInt) {
     }
 }
 
+fn pow10(e: u32) -> BigInt {
+    BigInt::from(10).pow(e)
+}
+
+/// Morpho's SharesMathLib.toAssetsUp — rounds against the borrower, which is
+/// what `_isHealthy` uses, so health must be computed with this and not a
+/// rounded-down conversion.
+fn to_assets_up(shares: &BigInt, total_assets: &BigInt, total_shares: &BigInt) -> BigInt {
+    let num = shares.clone() * (total_assets.clone() + BigInt::from(VIRTUAL_ASSETS));
+    let den = total_shares.clone() + BigInt::from(VIRTUAL_SHARES);
+    if den == BigInt::zero() {
+        return BigInt::zero();
+    }
+    // ceil division
+    (num + den.clone() - BigInt::one()) / den
+}
+
+/// Liquidation incentive factor, WAD.
+/// LIF = min(MAX_LIF, WAD / (WAD - LIQUIDATION_CURSOR * (WAD - lltv)))
+fn liquidation_incentive(lltv: &BigInt) -> BigInt {
+    let wad = pow10(WAD_EXP);
+    let max_lif = bi(MAX_LIF);
+    if *lltv >= wad {
+        return max_lif;
+    }
+    let cursor_term = BigInt::from(LIQUIDATION_CURSOR) * (wad.clone() - lltv.clone()) / wad.clone();
+    let den = wad.clone() - cursor_term;
+    if den <= BigInt::zero() {
+        return max_lif;
+    }
+    let lif = wad.clone() * wad / den;
+    if lif > max_lif {
+        max_lif
+    } else {
+        lif
+    }
+}
+
+/// Per-position risk, priced with the market's own oracle read over RPC.
+///
+/// `healthFactor` is also available from the Morpho API. What is not: the
+/// liquidation economics — how much collateral is actually seizable and at what
+/// incentive — which a liquidator needs and which only falls out of the
+/// contract math.
+#[substreams::handlers::map]
+pub fn map_position_risk(
+    clock: Clock,
+    events: sf::Events,
+    params: StoreGetProto<mp::MarketParams>,
+    totals: StoreGetBigInt,
+    positions: StoreGetBigInt,
+) -> Result<mp::PositionRisks, Error> {
+    let mut out = mp::PositionRisks::default();
+
+    // Only positions touched this block are re-priced. Re-pricing every open
+    // position every block would mean an RPC call per market per block for no
+    // new information.
+    let mut touched: Vec<(String, String)> = Vec::new();
+    let mut push = |m: &str, u: &str, v: &mut Vec<(String, String)>| {
+        let k = (m.to_string(), u.to_lowercase());
+        if !v.contains(&k) {
+            v.push(k);
+        }
+    };
+    for (_, ev) in ordered(&events) {
+        match ev {
+            Ev::Supply(e) => push(&e.market_id, &e.on_behalf, &mut touched),
+            Ev::Withdraw(e) => push(&e.market_id, &e.on_behalf, &mut touched),
+            Ev::Borrow(e) => push(&e.market_id, &e.on_behalf, &mut touched),
+            Ev::Repay(e) => push(&e.market_id, &e.on_behalf, &mut touched),
+            Ev::SupplyCollateral(e) => push(&e.market_id, &e.on_behalf, &mut touched),
+            Ev::WithdrawCollateral(e) => push(&e.market_id, &e.on_behalf, &mut touched),
+            Ev::Liquidate(e) => push(&e.market_id, &e.borrower, &mut touched),
+            Ev::Accrue(_) => {}
+        }
+    }
+    if touched.is_empty() {
+        return Ok(out);
+    }
+
+    // One RPC batch for the distinct markets in this block.
+    let mut markets: Vec<String> = Vec::new();
+    for (m, _) in &touched {
+        if !markets.contains(m) {
+            markets.push(m.clone());
+        }
+    }
+    let mut batch = RpcBatch::new();
+    let mut priced: Vec<(String, mp::MarketParams)> = Vec::new();
+    for m in &markets {
+        if let Some(p) = params.get_last(mkt_key(m, "params")) {
+            if let Ok(addr) = hex::decode(p.oracle.trim_start_matches("0x")) {
+                // A market may be created with the zero oracle; skip those.
+                if addr.iter().any(|b| *b != 0) {
+                    batch = batch.add(abi::morpho_oracle::functions::Price {}, addr);
+                    priced.push((m.clone(), p));
+                }
+            }
+        }
+    }
+    if priced.is_empty() {
+        return Ok(out);
+    }
+    let responses = match batch.execute() {
+        Ok(r) => r.responses,
+        Err(_) => return Ok(out),
+    };
+
+    let scale = pow10(ORACLE_PRICE_SCALE_EXP);
+    let wad = pow10(WAD_EXP);
+
+    for (i, (market_id, p)) in priced.iter().enumerate() {
+        let price = match responses.get(i).and_then(|r| {
+            RpcBatch::decode::<_, abi::morpho_oracle::functions::Price>(r)
+        }) {
+            Some(v) => v,
+            None => continue,
+        };
+        if price == BigInt::zero() {
+            continue;
+        }
+        let lltv = bi(&p.lltv);
+        let tba = totals
+            .get_last(mkt_key(market_id, "total_borrow_assets"))
+            .unwrap_or_else(BigInt::zero);
+        let tbs = totals
+            .get_last(mkt_key(market_id, "total_borrow_shares"))
+            .unwrap_or_else(BigInt::zero);
+        let lif = liquidation_incentive(&lltv);
+
+        for (m, user) in touched.iter().filter(|(m, _)| m == market_id) {
+            let collateral = positions
+                .get_last(pos_key(m, user, "collateral"))
+                .unwrap_or_else(BigInt::zero);
+            let borrow_shares = positions
+                .get_last(pos_key(m, user, "borrow_shares"))
+                .unwrap_or_else(BigInt::zero);
+            if borrow_shares <= BigInt::zero() && collateral <= BigInt::zero() {
+                continue;
+            }
+
+            let borrowed = to_assets_up(&borrow_shares, &tba, &tbs);
+            // maxBorrow = collateral.mulDivDown(price, 1e36).wMulDown(lltv)
+            let max_borrow = collateral.clone() * price.clone() / scale.clone() * lltv.clone() / wad.clone();
+            let liquidatable = borrowed > BigInt::zero() && max_borrow < borrowed;
+
+            let hf = if borrowed > BigInt::zero() {
+                (max_borrow.clone() * wad.clone() / borrowed.clone()).to_string()
+            } else {
+                String::new()
+            };
+
+            // Seizing the whole debt: borrowed.wMulDown(lif).mulDivDown(1e36, price)
+            let mut seizable = borrowed.clone() * lif.clone() / wad.clone() * scale.clone() / price.clone();
+            if seizable > collateral {
+                seizable = collateral.clone();
+            }
+
+            out.risks.push(mp::PositionRisk {
+                market_id: m.clone(),
+                user: user.clone(),
+                collateral: collateral.to_string(),
+                borrow_shares: borrow_shares.to_string(),
+                borrowed_assets: borrowed.to_string(),
+                oracle_price: price.to_string(),
+                lltv: p.lltv.clone(),
+                max_borrow: max_borrow.to_string(),
+                health_factor_wad: hf,
+                liquidatable,
+                seizable_collateral: if liquidatable { seizable.to_string() } else { String::new() },
+                liquidation_incentive_wad: lif.to_string(),
+                block_num: clock.number,
+                timestamp: clock.timestamp.as_ref().map(|t| t.seconds as u64).unwrap_or(0),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+/// Bad debt, attributed to the borrower who produced it.
+///
+/// The Morpho API reports bad debt per market, so it cannot answer "which
+/// position caused this" or "which liquidation socialized this loss".
+#[substreams::handlers::map]
+pub fn map_bad_debt(events: sf::Events) -> Result<mp::BadDebtEvents, Error> {
+    let mut out = mp::BadDebtEvents::default();
+    for e in &events.liquidates {
+        let assets = bi(&e.bad_debt_assets);
+        let shares = bi(&e.bad_debt_shares);
+        if assets == BigInt::zero() && shares == BigInt::zero() {
+            continue;
+        }
+        out.events.push(mp::BadDebtEvent {
+            id: e.id.clone(),
+            market_id: e.market_id.clone(),
+            borrower: e.borrower.to_lowercase(),
+            liquidator: e.caller.to_lowercase(),
+            bad_debt_assets: e.bad_debt_assets.clone(),
+            bad_debt_shares: e.bad_debt_shares.clone(),
+            seized_assets: e.seized_assets.clone(),
+            repaid_assets: e.repaid_assets.clone(),
+            tx_hash: e.tx_hash.clone(),
+            log_index: e.log_index,
+            block_num: e.block_num,
+            timestamp: e.timestamp,
+        });
+    }
+    Ok(out)
+}
+
+/// Cumulative realized bad debt, per market and per borrower.
+///
+/// The Morpho API exposes `realizedBadDebt` per market. Per-borrower totals are
+/// not available there, so "which addresses repeatedly leave bad debt behind"
+/// can only be answered from an index like this one.
+#[substreams::handlers::store]
+pub fn store_bad_debt(events: mp::BadDebtEvents, store: StoreAddBigInt) {
+    for e in events.events {
+        let assets = bi(&e.bad_debt_assets);
+        let shares = bi(&e.bad_debt_shares);
+        store.add(e.log_index, format!("bd:market:{}:assets", e.market_id), assets.clone());
+        store.add(e.log_index, format!("bd:market:{}:shares", e.market_id), shares);
+        store.add(
+            e.log_index,
+            format!("bd:borrower:{}:{}:assets", e.market_id, e.borrower),
+            assets,
+        );
+        store.add(e.log_index, format!("bd:borrower:{}:{}:count", e.market_id, e.borrower), BigInt::one());
+    }
+}
+
+/// The currently-liquidatable set, keyed `liq:{market_id}:{user}`.
+///
+/// CAVEAT, and it is a real one: positions are only re-priced when an event
+/// touches them. A position can cross into liquidatable purely because the
+/// oracle price moved, with no Morpho event at all, and this store will not
+/// notice until something touches that market. Re-pricing every open position
+/// every block would cost an RPC call per market per block, which is not
+/// practical here. Treat this as "known liquidatable as of the last touch",
+/// not as a complete real-time liquidation feed.
+#[substreams::handlers::store]
+pub fn store_liquidatable(risks: mp::PositionRisks, store: StoreSetString) {
+    for r in risks.risks {
+        let key = format!("liq:{}:{}", r.market_id, r.user);
+        if r.liquidatable {
+            store.set(r.block_num, key, &r.health_factor_wad);
+        } else {
+            // No longer underwater — drop it rather than leave a stale row.
+            store.delete_prefix(r.block_num as i64, &key);
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // SQL
 // ─────────────────────────────────────────────────────────────────────────────
@@ -688,6 +955,8 @@ pub fn db_out(
     vault_totals: Deltas<DeltaBigInt>,
     market_fees: Deltas<DeltaString>,
     blue_config: Deltas<DeltaString>,
+    bad_debt: Deltas<DeltaBigInt>,
+    liquidatable: Deltas<DeltaString>,
 ) -> Result<DatabaseChanges, Error> {
     let mut tables = Tables::new();
     let mut rs = RowSet::default();
@@ -780,6 +1049,34 @@ pub fn db_out(
         rs.put("blue_config", &d.key, "kind", kind.to_string());
         rs.put("blue_config", &d.key, "value", value);
         rs.put("blue_config", &d.key, "updated_block", block_num.clone());
+    }
+
+    // `bd:market:{id}:{field}` and `bd:borrower:{id}:{user}:{field}`
+    for d in bad_debt.deltas.iter() {
+        let p: Vec<&str> = d.key.split(':').collect();
+        if p.len() == 4 && p[1] == "market" {
+            rs.put("market_bad_debt", p[2], p[3], d.new_value.to_string());
+            rs.put("market_bad_debt", p[2], "updated_block", block_num.clone());
+        } else if p.len() == 5 && p[1] == "borrower" {
+            let id = format!("{}:{}", p[2], p[3]);
+            rs.put("borrower_bad_debt", &id, "market_id", p[2].to_string());
+            rs.put("borrower_bad_debt", &id, "borrower", p[3].to_string());
+            rs.put("borrower_bad_debt", &id, p[4], d.new_value.to_string());
+            rs.put("borrower_bad_debt", &id, "updated_block", block_num.clone());
+        }
+    }
+
+    // `liq:{market_id}:{user}` — value is the health factor in WAD
+    for d in liquidatable.deltas.iter() {
+        let p: Vec<&str> = d.key.splitn(3, ':').collect();
+        if p.len() != 3 || p[0] != "liq" {
+            continue;
+        }
+        let id = format!("{}:{}", p[1], p[2]);
+        rs.put("liquidatable_positions", &id, "market_id", p[1].to_string());
+        rs.put("liquidatable_positions", &id, "user_address", p[2].to_string());
+        rs.put("liquidatable_positions", &id, "health_factor_wad", d.new_value.clone());
+        rs.put("liquidatable_positions", &id, "updated_block", block_num.clone());
     }
 
     rs.flush(&mut tables);
