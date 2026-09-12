@@ -918,6 +918,21 @@ pub fn store_liquidatable(risks: mp::PositionRisks, store: StoreSetString) {
 
 /// Accumulate column writes per (table, primary key) so a block that touches
 /// several fields of one row emits a single upsert instead of clobbering itself.
+///
+/// Every table in schema.sql holds *stateful entities* — a market's totals, a
+/// user's position — not append-only events, so the same primary key is written
+/// again on every block that touches it. The sink accumulates operations across
+/// a whole flush batch (many blocks) before writing, which is why an
+/// INSERT-per-touch fails two different ways for one reason:
+///
+///   * two blocks inside one batch  -> "a primary key ..., that is already
+///     scheduled for insertion, insert should only be called once"
+///   * two blocks either side of a flush -> "duplicate key value violates
+///     unique constraint"
+///
+/// `flush` therefore schedules UPSERTs. The sink merges repeat touches of a key
+/// within a batch and emits `INSERT ... ON CONFLICT (pk) DO UPDATE SET ...`, so
+/// a re-touched row updates instead of colliding.
 #[derive(Default)]
 struct RowSet {
     rows: HashMap<(String, String), Vec<(String, String)>>,
@@ -930,13 +945,21 @@ impl RowSet {
         if !self.rows.contains_key(&k) {
             self.order.push(k.clone());
         }
-        self.rows.entry(k).or_default().push((col.to_string(), val));
+        let cols = self.rows.entry(k).or_default();
+        // Last write wins. A block can touch one column twice (two events moving
+        // the same market's totals), and the row must carry the final value, not
+        // a replay of every intermediate one.
+        match cols.iter_mut().find(|(c, _)| c == col) {
+            Some(slot) => slot.1 = val,
+            None => cols.push((col.to_string(), val)),
+        }
     }
 
     fn flush(self, tables: &mut Tables) {
         for k in &self.order {
             let cols = &self.rows[k];
-            let row = tables.create_row(&k.0, k.1.clone());
+            // upsert_row, never create_row: see the note on RowSet.
+            let row = tables.upsert_row(&k.0, k.1.clone());
             for (c, v) in cols {
                 row.set(c, v.clone());
             }
@@ -958,6 +981,36 @@ pub fn db_out(
     bad_debt: Deltas<DeltaBigInt>,
     liquidatable: Deltas<DeltaString>,
 ) -> Result<DatabaseChanges, Error> {
+    Ok(build_changes(
+        clock,
+        market_params,
+        market_totals,
+        positions,
+        vaults,
+        vault_positions,
+        vault_totals,
+        market_fees,
+        blue_config,
+        bad_debt,
+        liquidatable,
+    ))
+}
+
+/// The body of `db_out`, split out so tests can drive it directly without going
+/// through the generated wasm entrypoint.
+fn build_changes(
+    clock: Clock,
+    market_params: Deltas<DeltaProto<mp::MarketParams>>,
+    market_totals: Deltas<DeltaBigInt>,
+    positions: Deltas<DeltaBigInt>,
+    vaults: Deltas<DeltaProto<mp::VaultMeta>>,
+    vault_positions: Deltas<DeltaBigInt>,
+    vault_totals: Deltas<DeltaBigInt>,
+    market_fees: Deltas<DeltaString>,
+    blue_config: Deltas<DeltaString>,
+    bad_debt: Deltas<DeltaBigInt>,
+    liquidatable: Deltas<DeltaString>,
+) -> DatabaseChanges {
     let mut tables = Tables::new();
     let mut rs = RowSet::default();
     let block_num = clock.number.to_string();
@@ -1080,5 +1133,202 @@ pub fn db_out(
     }
 
     rs.flush(&mut tables);
-    Ok(tables.to_database_changes())
+    tables.to_database_changes()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use substreams::pb::substreams::store_delta::Operation as DeltaOp;
+    use substreams_database_change::pb::sf::substreams::sink::database::v1::{
+        table_change::{Operation, PrimaryKey},
+        TableChange,
+    };
+
+    /// The live WETH/wstETH market (94.5% LLTV).
+    const MKT: &str = "0xc54d7acf14de29e0e5527cabd7a576506870346a78a11a6762e2cca66322ec41";
+    const USER: &str = "0x1111111111111111111111111111111111111111";
+    const BLOCK: u64 = 18926166;
+
+    fn big(key: &str, v: u64) -> DeltaBigInt {
+        DeltaBigInt {
+            operation: DeltaOp::Update,
+            ordinal: 0,
+            key: key.to_string(),
+            old_value: BigInt::zero(),
+            new_value: BigInt::from(v),
+        }
+    }
+
+    fn text(key: &str, v: &str) -> DeltaString {
+        DeltaString {
+            operation: DeltaOp::Update,
+            ordinal: 0,
+            key: key.to_string(),
+            old_value: String::new(),
+            new_value: v.to_string(),
+        }
+    }
+
+    /// Every `db_out` input, defaulted to empty so a test names only what it drives.
+    #[derive(Default)]
+    struct Inputs {
+        market_params: Vec<DeltaProto<mp::MarketParams>>,
+        market_totals: Vec<DeltaBigInt>,
+        positions: Vec<DeltaBigInt>,
+        vaults: Vec<DeltaProto<mp::VaultMeta>>,
+        vault_positions: Vec<DeltaBigInt>,
+        vault_totals: Vec<DeltaBigInt>,
+        market_fees: Vec<DeltaString>,
+        blue_config: Vec<DeltaString>,
+        bad_debt: Vec<DeltaBigInt>,
+        liquidatable: Vec<DeltaString>,
+    }
+
+    impl Inputs {
+        fn run(self) -> DatabaseChanges {
+            build_changes(
+                Clock {
+                    id: String::new(),
+                    number: BLOCK,
+                    timestamp: None,
+                },
+                Deltas { deltas: self.market_params },
+                Deltas { deltas: self.market_totals },
+                Deltas { deltas: self.positions },
+                Deltas { deltas: self.vaults },
+                Deltas { deltas: self.vault_positions },
+                Deltas { deltas: self.vault_totals },
+                Deltas { deltas: self.market_fees },
+                Deltas { deltas: self.blue_config },
+                Deltas { deltas: self.bad_debt },
+                Deltas { deltas: self.liquidatable },
+            )
+        }
+    }
+
+    fn rows<'a>(c: &'a DatabaseChanges, table: &str) -> Vec<&'a TableChange> {
+        c.table_changes.iter().filter(|t| t.table == table).collect()
+    }
+
+    fn pk(t: &TableChange) -> &str {
+        match t.primary_key.as_ref().expect("row has no primary key") {
+            PrimaryKey::Pk(k) => k,
+            PrimaryKey::CompositePk(_) => panic!("unexpected composite primary key"),
+        }
+    }
+
+    fn field<'a>(t: &'a TableChange, name: &str) -> Option<&'a str> {
+        t.fields.iter().find(|f| f.name == name).map(|f| f.value.as_str())
+    }
+
+    /// The CrashLoop in issue #1: several deltas touching one market inside a
+    /// single block must produce exactly ONE market_states row, not one per delta.
+    #[test]
+    fn market_states_is_one_upsert_per_market() {
+        let changes = Inputs {
+            market_totals: vec![
+                big(&format!("mkt:{}:total_supply_assets", MKT), 1_000),
+                big(&format!("mkt:{}:total_supply_shares", MKT), 2_000),
+                big(&format!("mkt:{}:total_borrow_assets", MKT), 3_000),
+                big(&format!("mkt:{}:total_borrow_shares", MKT), 4_000),
+            ],
+            market_fees: vec![text(&format!("fee:{}", MKT), "5")],
+            ..Default::default()
+        }
+        .run();
+
+        let states = rows(&changes, "market_states");
+        assert_eq!(states.len(), 1, "expected one market_states row, got {}", states.len());
+        assert_eq!(pk(states[0]), MKT);
+
+        // The single row still carries every column those deltas touched.
+        assert_eq!(field(states[0], "total_supply_assets"), Some("1000"));
+        assert_eq!(field(states[0], "total_supply_shares"), Some("2000"));
+        assert_eq!(field(states[0], "total_borrow_assets"), Some("3000"));
+        assert_eq!(field(states[0], "total_borrow_shares"), Some("4000"));
+        assert_eq!(field(states[0], "fee"), Some("5"));
+        assert_eq!(field(states[0], "updated_block"), Some(BLOCK.to_string().as_str()));
+    }
+
+    /// The stateful tables are rewritten on every block that touches them, and the
+    /// sink batches many blocks per transaction. An INSERT would collide with
+    /// itself inside one batch and with committed rows across batches, so nothing
+    /// db_out emits may be a CREATE.
+    #[test]
+    fn every_change_is_an_upsert_never_an_insert() {
+        let changes = Inputs {
+            market_totals: vec![big(&format!("mkt:{}:total_supply_assets", MKT), 1)],
+            market_fees: vec![text(&format!("fee:{}", MKT), "1")],
+            positions: vec![big(&format!("pos:{}:{}:borrow_shares", MKT, USER), 7)],
+            vault_positions: vec![big(&format!("vpos:{}:{}", USER, USER), 9)],
+            vault_totals: vec![big(&format!("vtot:{}:total_shares", USER), 11)],
+            blue_config: vec![text("owner", USER)],
+            bad_debt: vec![big(&format!("bd:market:{}:assets", MKT), 13)],
+            liquidatable: vec![text(&format!("liq:{}:{}", MKT, USER), "900000000000000000")],
+            ..Default::default()
+        }
+        .run();
+
+        assert!(!changes.table_changes.is_empty(), "no changes emitted");
+        for t in &changes.table_changes {
+            assert_eq!(
+                t.operation,
+                Operation::Upsert as i32,
+                "table {} pk {} emitted operation {} — only UPSERT is safe here",
+                t.table,
+                pk(t),
+                t.operation,
+            );
+        }
+    }
+
+    /// Two events moving the same column in one block: the row must carry the
+    /// final value once, not both writes.
+    #[test]
+    fn repeated_column_write_keeps_the_last_value() {
+        let changes = Inputs {
+            market_totals: vec![
+                big(&format!("mkt:{}:total_supply_assets", MKT), 100),
+                big(&format!("mkt:{}:total_supply_assets", MKT), 250),
+            ],
+            ..Default::default()
+        }
+        .run();
+
+        let states = rows(&changes, "market_states");
+        assert_eq!(states.len(), 1);
+        let hits = states[0]
+            .fields
+            .iter()
+            .filter(|f| f.name == "total_supply_assets")
+            .count();
+        assert_eq!(hits, 1, "column written {} times, expected once", hits);
+        assert_eq!(field(states[0], "total_supply_assets"), Some("250"));
+    }
+
+    /// A position keyed `{market}:{user}` is one row carrying both id columns.
+    #[test]
+    fn position_row_is_keyed_by_market_and_user() {
+        let changes = Inputs {
+            positions: vec![
+                big(&format!("pos:{}:{}:supply_shares", MKT, USER), 10),
+                big(&format!("pos:{}:{}:collateral", MKT, USER), 20),
+            ],
+            ..Default::default()
+        }
+        .run();
+
+        let p = rows(&changes, "positions");
+        assert_eq!(p.len(), 1);
+        assert_eq!(pk(p[0]), format!("{}:{}", MKT, USER));
+        assert_eq!(field(p[0], "market_id"), Some(MKT));
+        assert_eq!(field(p[0], "user_address"), Some(USER));
+        assert_eq!(field(p[0], "supply_shares"), Some("10"));
+        assert_eq!(field(p[0], "collateral"), Some("20"));
+    }
 }

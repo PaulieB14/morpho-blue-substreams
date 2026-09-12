@@ -7,17 +7,17 @@ emitted as upsert SQL you can sink into your own database.
 <img src="assets/icon.png" width="72" align="right" alt="Substreams" />
 
 **Published:**
-[`morpho-blue-paulie`](https://substreams.dev/packages/morpho-blue-paulie/v0.1.0) (Ethereum) ·
-[`morpho-blue-paulie-base`](https://substreams.dev/packages/morpho-blue-paulie-base/v0.1.0) (Base)
+[`morpho-blue-paulie`](https://substreams.dev/packages/morpho-blue-paulie/v0.2.1) (Ethereum) ·
+[`morpho-blue-paulie-base`](https://substreams.dev/packages/morpho-blue-paulie-base/v0.2.1) (Base)
 
 ```bash
 # Direct artifact URLs — these always work
-substreams gui https://spkg.io/v1/packages/morpho-blue-paulie/v0.1.0        # Ethereum
-substreams gui https://spkg.io/v1/packages/morpho-blue-paulie-base/v0.1.0   # Base
+substreams gui https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.1        # Ethereum
+substreams gui https://spkg.io/v1/packages/morpho-blue-paulie-base/v0.2.1   # Base
 
 # Short names, once the registry finishes indexing them
-substreams gui morpho-blue-paulie@v0.1.0
-substreams gui morpho-blue-paulie-base@v0.1.0
+substreams gui morpho-blue-paulie@v0.2.1
+substreams gui morpho-blue-paulie-base@v0.2.1
 ```
 
 ## What this is
@@ -89,10 +89,11 @@ is vendored at `vendor/` to keep this package self-contained.
 
 ```bash
 make build          # cargo build --target wasm32-unknown-unknown --release
-make pack           # -> morpho-blue-paulie-v0.1.0.spkg
+make pack           # -> morpho-blue-paulie-v0.2.1.spkg
+make test           # host-side unit tests for db_out
 make stale          # guard: fails if the .wasm is older than src/
 
-substreams run morpho-blue-paulie-v0.1.0.spkg db_out \
+substreams run morpho-blue-paulie-v0.2.1.spkg db_out \
   -e mainnet.eth.streamingfast.io:443 --start-block 18883124 --stop-block +1000
 ```
 
@@ -103,6 +104,19 @@ Sink the output with
 [substreams-sink-sql](https://github.com/streamingfast/substreams-sink-sql)
 against [`schema.sql`](schema.sql). Numeric columns default to `0` because
 `db_out` emits only the columns that changed in a block.
+
+The package carries its own sink config, so `schema.sql` and the `cursors` table
+come straight from the published artifact:
+
+```bash
+substreams-sink-sql setup "$DSN" https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.1
+substreams-sink-sql run   "$DSN" https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.1
+```
+
+**Postgres only.** Every table here is a stateful entity that is rewritten on
+each block that touches it, so `db_out` emits `OPERATION_UPSERT`
+(`INSERT ... ON CONFLICT (pk) DO UPDATE`). Postgres is the only
+substreams-sink-sql dialect that implements upserts; ClickHouse rejects them.
 
 ## Tables
 

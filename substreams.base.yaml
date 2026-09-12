@@ -3,7 +3,7 @@ specVersion: v0.1.0
 
 package:
   name: morpho_blue_paulie_base
-  version: v0.2.0
+  version: v0.2.1
   description: >
     Morpho Blue + MetaMorpho Substreams for BASE. Composes StreamingFast's
     morpho-blue-substreams map_events for the Blue event tape, then adds what
@@ -20,6 +20,11 @@ imports:
   # package is self-contained; `make vendor` regenerates it from source.
   morpho_sf: ./vendor/morpho-blue-substreams-base-v0.1.0.spkg
   database: https://github.com/streamingfast/substreams-sink-database-changes/releases/download/v4.0.0/substreams-sink-database-changes-v4.0.0.spkg
+  # Carries sf.substreams.sink.sql.v1.Service, the message the `sink:` block
+  # below is encoded into. Without this import `substreams pack` cannot resolve
+  # the sink type ("could not find protobuf message type ... in bundled
+  # protobuf descriptors"). protodefs-v1.0.7 is the only release that ships it.
+  sql: https://github.com/streamingfast/substreams-sink-sql/releases/download/protodefs-v1.0.7/substreams-sink-sql-protodefs-v1.0.7.spkg
 
 network: base
 
@@ -266,3 +271,15 @@ modules:
     output:
       type: proto:sf.substreams.sink.database.v1.DatabaseChanges
 
+# Sink config so `substreams-sink-sql setup` (and the Hosted Sink) can apply
+# schema.sql and create the cursors table straight from the published spkg.
+#
+# engine: postgres is load-bearing. db_out emits OPERATION_UPSERT, and postgres
+# is the only dialect in substreams-sink-sql that implements it
+# (INSERT ... ON CONFLICT DO UPDATE); ClickHouse rejects upserts outright.
+sink:
+  module: db_out
+  type: sf.substreams.sink.sql.v1.Service
+  config:
+    engine: postgres
+    schema: ./schema.sql
