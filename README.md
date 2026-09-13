@@ -7,17 +7,17 @@ emitted as upsert SQL you can sink into your own database.
 <img src="assets/icon.png" width="72" align="right" alt="Substreams" />
 
 **Published:**
-[`morpho-blue-paulie`](https://substreams.dev/packages/morpho-blue-paulie/v0.2.2) (Ethereum) ·
-[`morpho-blue-paulie-base`](https://substreams.dev/packages/morpho-blue-paulie-base/v0.2.2) (Base)
+[`morpho-blue-paulie`](https://substreams.dev/packages/morpho-blue-paulie/v0.2.3) (Ethereum) ·
+[`morpho-blue-paulie-base`](https://substreams.dev/packages/morpho-blue-paulie-base/v0.2.3) (Base)
 
 ```bash
 # Direct artifact URLs — these always work
-substreams gui https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.2        # Ethereum
-substreams gui https://spkg.io/v1/packages/morpho-blue-paulie-base/v0.2.2   # Base
+substreams gui https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.3        # Ethereum
+substreams gui https://spkg.io/v1/packages/morpho-blue-paulie-base/v0.2.3   # Base
 
 # Short names, once the registry finishes indexing them
-substreams gui morpho-blue-paulie@v0.2.2
-substreams gui morpho-blue-paulie-base@v0.2.2
+substreams gui morpho-blue-paulie@v0.2.3
+substreams gui morpho-blue-paulie-base@v0.2.3
 ```
 
 ## What this is
@@ -89,11 +89,11 @@ is vendored at `vendor/` to keep this package self-contained.
 
 ```bash
 make build          # cargo build --target wasm32-unknown-unknown --release
-make pack           # -> morpho-blue-paulie-v0.2.2.spkg
+make pack           # -> morpho-blue-paulie-v0.2.3.spkg
 make test           # host-side unit tests for db_out
 make stale          # guard: fails if the .wasm is older than src/
 
-substreams run morpho-blue-paulie-v0.2.2.spkg db_out \
+substreams run morpho-blue-paulie-v0.2.3.spkg db_out \
   -e mainnet.eth.streamingfast.io:443 --start-block 18883124 --stop-block +1000
 ```
 
@@ -109,8 +109,8 @@ The package carries its own sink config, so `schema.sql` and the `cursors` table
 come straight from the published artifact:
 
 ```bash
-substreams-sink-sql setup "$DSN" https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.2
-substreams-sink-sql run   "$DSN" https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.2
+substreams-sink-sql setup "$DSN" https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.3
+substreams-sink-sql run   "$DSN" https://spkg.io/v1/packages/morpho-blue-paulie/v0.2.3
 ```
 
 **Postgres only.** Every table here is a stateful entity that is rewritten on
@@ -129,7 +129,7 @@ substreams-sink-sql dialect that implements upserts; ClickHouse rejects them.
 | `vault_positions` | `{vault}:{user}` | vault share balance |
 | `vault_states` | vault address | `total_shares` (exact), `net_deposited_assets` |
 | `blue_config` | `owner` / `irm:…` / `lltv:…` | protocol owner and enabled IRM/LLTV sets |
-| `liquidatable_positions` | `{market_id}:{user}` | known-underwater positions + health factor |
+| `liquidatable_positions` | `{market_id}:{user}` | last known health factor per touched position — filter `health_factor_wad < 1e18` |
 | `market_bad_debt` | `market_id` | cumulative realized bad debt |
 | `borrower_bad_debt` | `{market_id}:{borrower}` | bad debt attributed to the borrower, with a count |
 
@@ -166,6 +166,27 @@ that crosses into liquidation purely because the oracle moved is not seen until
 the next touch — re-pricing every open position every block would mean an RPC
 call per market per block. Treat `liquidatable_positions` as "known
 liquidatable as of last touch", not a complete real-time feed.
+
+### Reading `liquidatable_positions`
+
+The table holds the **last known health factor for every position it has
+touched**, healthy ones included. Row presence does not mean "liquidatable" —
+select on the value:
+
+```sql
+SELECT market_id, user_address, health_factor_wad
+FROM liquidatable_positions
+WHERE health_factor_wad < 1000000000000000000   -- 1e18 WAD; below 1 is underwater
+ORDER BY health_factor_wad ASC;
+```
+
+It works this way because `db_out` never deletes. substreams-sink-sql
+accumulates operations across a whole flush batch rather than a block, and
+refuses to upsert a primary key that has a delete scheduled anywhere in that
+batch. A position that heals in one block and goes underwater again a few
+blocks later would emit DELETE then UPSERT for one key inside one batch and
+crashloop the sink (seen on Ethereum at block 19722328). Keeping the row and
+letting the health factor carry the meaning avoids the conflict entirely.
 
 ## Scope
 

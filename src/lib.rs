@@ -17,7 +17,7 @@
 mod abi;
 mod pb;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::str::FromStr;
 
 use substreams::errors::Error;
@@ -25,7 +25,7 @@ use substreams::pb::substreams::store_delta::Operation as DeltaOperation;
 use substreams::pb::substreams::Clock;
 use substreams::scalar::BigInt;
 use substreams::store::{
-    DeltaBigInt, DeltaProto, DeltaString, Deltas, StoreAdd, StoreAddBigInt, StoreDelete, StoreGet,
+    DeltaBigInt, DeltaProto, DeltaString, Deltas, StoreAdd, StoreAddBigInt, StoreGet,
     StoreGetBigInt, StoreGetProto, StoreGetString, StoreNew, StoreSet, StoreSetProto,
     StoreSetString,
 };
@@ -891,7 +891,20 @@ pub fn store_bad_debt(events: mp::BadDebtEvents, store: StoreAddBigInt) {
     }
 }
 
-/// The currently-liquidatable set, keyed `liq:{market_id}:{user}`.
+/// Last known health factor per touched position, keyed `liq:{market_id}:{user}`.
+///
+/// This store NEVER deletes. A healed position keeps its row carrying the
+/// healthy health factor, and consumers select the underwater set with
+/// `health_factor_wad < 1e18` rather than by row presence.
+///
+/// That is not a style choice. substreams-sink-sql accumulates operations over
+/// a whole flush batch, not a block, and its `Upsert()` refuses a primary key
+/// that already has a delete scheduled in that batch. A position that heals in
+/// block N and goes underwater again in block N+k therefore emits DELETE then
+/// UPSERT for one key inside one batch, and the sink rejects it — observed on
+/// ETH at block 19722328 with the last good cursor 126 blocks behind. A module
+/// cannot see flush boundaries, so no amount of per-block coalescing avoids it.
+/// Never emitting a delete does.
 ///
 /// CAVEAT, and it is a real one: positions are only re-priced when an event
 /// touches them. A position can cross into liquidatable purely because the
@@ -904,12 +917,11 @@ pub fn store_bad_debt(events: mp::BadDebtEvents, store: StoreAddBigInt) {
 pub fn store_liquidatable(risks: mp::PositionRisks, store: StoreSetString) {
     for r in risks.risks {
         let key = format!("liq:{}:{}", r.market_id, r.user);
-        if r.liquidatable {
-            store.set(r.block_num, key, &r.health_factor_wad);
-        } else {
-            // No longer underwater — drop it rather than leave a stale row.
-            store.delete_prefix(r.block_num as i64, &key);
-        }
+        // Healthy or underwater, the row records the health factor we last saw.
+        // `r.liquidatable` is recoverable from it (< 1e18), so nothing is lost
+        // by keeping healthy rows — and keeping them is what avoids the
+        // delete/upsert batch conflict described above.
+        store.set(r.block_num, key, &r.health_factor_wad);
     }
 }
 
@@ -934,32 +946,25 @@ pub fn store_liquidatable(risks: mp::PositionRisks, store: StoreSetString) {
 /// `flush` therefore schedules UPSERTs. The sink merges repeat touches of a key
 /// within a batch and emits `INSERT ... ON CONFLICT (pk) DO UPDATE SET ...`, so
 /// a re-touched row updates instead of colliding.
+///
+/// NOTE: there is deliberately no `delete`. substreams-sink-sql batches
+/// operations across many blocks and refuses to upsert a primary key that has
+/// a delete scheduled anywhere in that batch, so any table this crate writes
+/// which can be deleted and then re-written will crashloop the sink. Model
+/// removal as a value instead (see store_liquidatable). If you add a delete
+/// here, read that note first.
 #[derive(Default)]
 struct RowSet {
     rows: HashMap<(String, String), Vec<(String, String)>>,
     order: Vec<(String, String)>,
-    deleted: HashSet<(String, String)>,
 }
 
 impl RowSet {
-    /// Drop this row. Supersedes any column writes already accumulated for the
-    /// key in this block — the row is going away, so its columns are moot.
-    fn delete(&mut self, table: &str, key: &str) {
-        let k = (table.to_string(), key.to_string());
-        if !self.rows.contains_key(&k) {
-            self.order.push(k.clone());
-        }
-        self.rows.insert(k.clone(), Vec::new());
-        self.deleted.insert(k);
-    }
-
     fn put(&mut self, table: &str, key: &str, col: &str, val: String) {
         let k = (table.to_string(), key.to_string());
         if !self.rows.contains_key(&k) {
             self.order.push(k.clone());
         }
-        // A write after a delete in the same block means the row came back.
-        self.deleted.remove(&k);
         let cols = self.rows.entry(k).or_default();
         // Last write wins. A block can touch one column twice (two events moving
         // the same market's totals), and the row must carry the final value, not
@@ -972,10 +977,6 @@ impl RowSet {
 
     fn flush(self, tables: &mut Tables) {
         for k in &self.order {
-            if self.deleted.contains(k) {
-                tables.delete_row(&k.0, k.1.clone());
-                continue;
-            }
             let cols = &self.rows[k];
             // upsert_row, never create_row: see the note on RowSet.
             let row = tables.upsert_row(&k.0, k.1.clone());
@@ -1140,22 +1141,19 @@ fn build_changes(
 
     // `liq:{market_id}:{user}` — value is the health factor in WAD.
     //
-    // store_liquidatable DELETES the key when a position heals, and a delete
-    // delta carries an EMPTY new_value. Treating it like any other delta wrote
-    // "" into health_factor_wad — a NUMERIC column, so Postgres rejects it —
-    // and left the healed position sitting in liquidatable_positions forever,
-    // reporting a liquidation that is no longer available. A delete delta has
-    // to delete the row.
+    // Upserts only. store_liquidatable no longer deletes (see its note), so a
+    // delete delta should not occur; if one ever does it is SKIPPED rather than
+    // turned into a delete_row, because a delete scheduled anywhere in a sink
+    // flush batch poisons every later upsert of that primary key. A blank
+    // health factor is likewise never written — it is not a number, and the
+    // row's last known value beats a broken one.
     for d in liquidatable.deltas.iter() {
         let p: Vec<&str> = d.key.splitn(3, ':').collect();
         if p.len() != 3 || p[0] != "liq" {
             continue;
         }
         let id = format!("{}:{}", p[1], p[2]);
-        // Healed, or no health factor to report: either way the row goes. An
-        // empty health factor is never written — a blank is not a liquidation.
         if d.operation == DeltaOperation::Delete || d.new_value.trim().is_empty() {
-            rs.delete("liquidatable_positions", &id);
             continue;
         }
         rs.put("liquidatable_positions", &id, "market_id", p[1].to_string());
@@ -1308,19 +1306,12 @@ mod tests {
 
         assert!(!changes.table_changes.is_empty(), "no changes emitted");
         for t in &changes.table_changes {
-            // DELETE is legitimate (a healed liquidatable position); CREATE is
-            // the one that collides inside a sink batch.
-            assert_ne!(
+            // Nothing this crate writes may be a CREATE (collides inside a
+            // sink flush batch) or a DELETE (poisons later upserts of that key).
+            assert_eq!(
                 t.operation,
-                Operation::Create as i32,
-                "table {} pk {} emitted CREATE — it collides inside a flush batch",
-                t.table,
-                pk(t),
-            );
-            assert!(
-                t.operation == Operation::Upsert as i32
-                    || t.operation == Operation::Delete as i32,
-                "table {} pk {} emitted unexpected operation {}",
+                Operation::Upsert as i32,
+                "table {} pk {} emitted operation {} — only UPSERT is safe here",
                 t.table, pk(t), t.operation,
             );
         }
@@ -1351,7 +1342,8 @@ mod tests {
     }
 
     fn text_del(key: &str) -> DeltaString {
-        // store.delete_prefix produces a DELETE delta whose new_value is empty.
+        // A delete delta (empty new_value). store_liquidatable no longer emits
+        // these; the fixture exists so db_out is proven to ignore one if it ever does.
         DeltaString {
             operation: DeltaOp::Delete,
             ordinal: 0,
@@ -1361,24 +1353,21 @@ mod tests {
         }
     }
 
-    /// A healed position must be DELETED, not upserted with a blank health
-    /// factor. The blank is what Postgres rejects on a NUMERIC column, and the
-    /// stale row is what reports a liquidation that is no longer available.
+    /// db_out must never emit a DELETE for this table. A delete scheduled
+    /// anywhere in a sink flush batch makes every later upsert of that primary
+    /// key fail — the crash at ETH 19722328.
     #[test]
-    fn healed_position_is_deleted_not_blanked() {
+    fn liquidatable_positions_never_emits_a_delete() {
+        let key = format!("liq:{}:{}", MKT, USER);
         let changes = Inputs {
-            liquidatable: vec![text_del(&format!("liq:{}:{}", MKT, USER))],
+            liquidatable: vec![text_del(&key), text(&key, "900000000000000000")],
             ..Default::default()
         }
         .run();
-
-        let rows_out = rows(&changes, "liquidatable_positions");
-        assert_eq!(rows_out.len(), 1);
-        assert_eq!(pk(rows_out[0]), format!("{}:{}", MKT, USER));
-        assert_eq!(rows_out[0].operation, Operation::Delete as i32,
-                   "a healed position must be deleted");
-        assert_eq!(field(rows_out[0], "health_factor_wad"), None,
-                   "a delete must not carry a health factor");
+        for t in &changes.table_changes {
+            assert_ne!(t.operation, Operation::Delete as i32,
+                       "table {} emitted DELETE — the sink cannot take it", t.table);
+        }
     }
 
     /// Defence in depth: an empty health factor is never written as a column,
@@ -1414,21 +1403,40 @@ mod tests {
         assert_eq!(field(r[0], "user_address"), Some(USER));
     }
 
-    /// Delete and write in one block resolve to a single operation, never two
-    /// changes for one primary key — that would be the CrashLoop all over again.
+    /// The healthy <-> underwater cycle that crashed the sink. Whatever order
+    /// the deltas arrive in, one key yields one UPSERT and never a delete.
     #[test]
-    fn delete_and_write_in_one_block_emit_one_change() {
+    fn healthy_and_underwater_cycle_only_upserts() {
         let key = format!("liq:{}:{}", MKT, USER);
+        let healthy = "1200000000000000000"; // > 1e18
+        let under = "800000000000000000";    // < 1e18
+        for (label, deltas) in [
+            ("healed then underwater", vec![text(&key, healthy), text(&key, under)]),
+            ("underwater then healed", vec![text(&key, under), text(&key, healthy)]),
+            ("delete delta then write", vec![text_del(&key), text(&key, under)]),
+        ] {
+            let changes = Inputs { liquidatable: deltas, ..Default::default() }.run();
+            let r = rows(&changes, "liquidatable_positions");
+            assert_eq!(r.len(), 1, "{label}: one key must yield one change");
+            assert_eq!(r[0].operation, Operation::Upsert as i32, "{label}");
+        }
+    }
+
+    /// A healed position keeps its row carrying the healthy health factor, so
+    /// consumers filter on the value rather than on row presence.
+    #[test]
+    fn healed_position_keeps_its_row_with_a_healthy_factor() {
+        let healthy = "1200000000000000000";
         let changes = Inputs {
-            liquidatable: vec![text_del(&key), text(&key, "800000000000000000")],
+            liquidatable: vec![text(&format!("liq:{}:{}", MKT, USER), healthy)],
             ..Default::default()
         }
         .run();
         let r = rows(&changes, "liquidatable_positions");
-        assert_eq!(r.len(), 1, "one primary key must yield one change");
-        // The later write wins: the position is liquidatable again.
-        assert_eq!(r[0].operation, Operation::Upsert as i32);
-        assert_eq!(field(r[0], "health_factor_wad"), Some("800000000000000000"));
+        assert_eq!(r.len(), 1);
+        assert_eq!(field(r[0], "health_factor_wad"), Some(healthy));
+        assert!(healthy.parse::<u128>().unwrap() >= 1_000_000_000_000_000_000u128,
+                "fixture must sit on the healthy side of the 1e18 threshold");
     }
 
     /// A position keyed `{market}:{user}` is one row carrying both id columns.

@@ -2,7 +2,7 @@ specVersion: v0.1.0
 
 package:
   name: morpho_blue_paulie
-  version: v0.2.2
+  version: v0.2.3
   description: >
     Morpho Blue + MetaMorpho Substreams. Composes StreamingFast's
     morpho-blue-substreams map_events for the Blue event tape, then adds what

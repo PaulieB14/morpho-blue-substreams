@@ -80,9 +80,14 @@ CREATE TABLE IF NOT EXISTS blue_config (
   updated_block  BIGINT
 );
 
--- Known-liquidatable positions. NOTE: only refreshed when an event touches the
--- position, so a purely price-driven move into liquidation is not reflected
--- until the next touch. See store_liquidatable in src/lib.rs.
+-- Last known health factor per touched position — healthy rows included.
+-- Row presence does NOT mean liquidatable: filter `health_factor_wad < 1e18`.
+-- db_out never deletes from this table; a delete scheduled anywhere in a
+-- substreams-sink-sql flush batch makes every later upsert of that primary key
+-- fail, which crashlooped the sink at ETH block 19722328.
+-- NOTE: only refreshed when an event touches the position, so a purely
+-- price-driven move into liquidation is not reflected until the next touch.
+-- See store_liquidatable in src/lib.rs.
 CREATE TABLE IF NOT EXISTS liquidatable_positions (
   id                 TEXT PRIMARY KEY,          -- {market_id}:{user}
   market_id          TEXT NOT NULL DEFAULT '',
