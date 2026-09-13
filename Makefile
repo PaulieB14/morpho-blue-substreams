@@ -1,5 +1,5 @@
-SPKG      := morpho-blue-paulie-v0.2.1.spkg
-SPKG_BASE := morpho-blue-paulie-base-v0.2.1.spkg
+SPKG      := morpho-blue-paulie-v0.2.2.spkg
+SPKG_BASE := morpho-blue-paulie-base-v0.2.2.spkg
 WASM      := target/wasm32-unknown-unknown/release/morpho_blue_paulie.wasm
 ENDPOINT  ?= mainnet.eth.streamingfast.io:443
 VENDOR    := vendor/morpho-blue-substreams-v0.1.0.spkg

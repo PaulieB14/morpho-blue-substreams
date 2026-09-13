@@ -17,10 +17,11 @@
 mod abi;
 mod pb;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 
 use substreams::errors::Error;
+use substreams::pb::substreams::store_delta::Operation as DeltaOperation;
 use substreams::pb::substreams::Clock;
 use substreams::scalar::BigInt;
 use substreams::store::{
@@ -937,14 +938,28 @@ pub fn store_liquidatable(risks: mp::PositionRisks, store: StoreSetString) {
 struct RowSet {
     rows: HashMap<(String, String), Vec<(String, String)>>,
     order: Vec<(String, String)>,
+    deleted: HashSet<(String, String)>,
 }
 
 impl RowSet {
+    /// Drop this row. Supersedes any column writes already accumulated for the
+    /// key in this block — the row is going away, so its columns are moot.
+    fn delete(&mut self, table: &str, key: &str) {
+        let k = (table.to_string(), key.to_string());
+        if !self.rows.contains_key(&k) {
+            self.order.push(k.clone());
+        }
+        self.rows.insert(k.clone(), Vec::new());
+        self.deleted.insert(k);
+    }
+
     fn put(&mut self, table: &str, key: &str, col: &str, val: String) {
         let k = (table.to_string(), key.to_string());
         if !self.rows.contains_key(&k) {
             self.order.push(k.clone());
         }
+        // A write after a delete in the same block means the row came back.
+        self.deleted.remove(&k);
         let cols = self.rows.entry(k).or_default();
         // Last write wins. A block can touch one column twice (two events moving
         // the same market's totals), and the row must carry the final value, not
@@ -957,6 +972,10 @@ impl RowSet {
 
     fn flush(self, tables: &mut Tables) {
         for k in &self.order {
+            if self.deleted.contains(k) {
+                tables.delete_row(&k.0, k.1.clone());
+                continue;
+            }
             let cols = &self.rows[k];
             // upsert_row, never create_row: see the note on RowSet.
             let row = tables.upsert_row(&k.0, k.1.clone());
@@ -1119,13 +1138,26 @@ fn build_changes(
         }
     }
 
-    // `liq:{market_id}:{user}` — value is the health factor in WAD
+    // `liq:{market_id}:{user}` — value is the health factor in WAD.
+    //
+    // store_liquidatable DELETES the key when a position heals, and a delete
+    // delta carries an EMPTY new_value. Treating it like any other delta wrote
+    // "" into health_factor_wad — a NUMERIC column, so Postgres rejects it —
+    // and left the healed position sitting in liquidatable_positions forever,
+    // reporting a liquidation that is no longer available. A delete delta has
+    // to delete the row.
     for d in liquidatable.deltas.iter() {
         let p: Vec<&str> = d.key.splitn(3, ':').collect();
         if p.len() != 3 || p[0] != "liq" {
             continue;
         }
         let id = format!("{}:{}", p[1], p[2]);
+        // Healed, or no health factor to report: either way the row goes. An
+        // empty health factor is never written — a blank is not a liquidation.
+        if d.operation == DeltaOperation::Delete || d.new_value.trim().is_empty() {
+            rs.delete("liquidatable_positions", &id);
+            continue;
+        }
         rs.put("liquidatable_positions", &id, "market_id", p[1].to_string());
         rs.put("liquidatable_positions", &id, "user_address", p[2].to_string());
         rs.put("liquidatable_positions", &id, "health_factor_wad", d.new_value.clone());
@@ -1276,13 +1308,20 @@ mod tests {
 
         assert!(!changes.table_changes.is_empty(), "no changes emitted");
         for t in &changes.table_changes {
-            assert_eq!(
+            // DELETE is legitimate (a healed liquidatable position); CREATE is
+            // the one that collides inside a sink batch.
+            assert_ne!(
                 t.operation,
-                Operation::Upsert as i32,
-                "table {} pk {} emitted operation {} — only UPSERT is safe here",
+                Operation::Create as i32,
+                "table {} pk {} emitted CREATE — it collides inside a flush batch",
                 t.table,
                 pk(t),
-                t.operation,
+            );
+            assert!(
+                t.operation == Operation::Upsert as i32
+                    || t.operation == Operation::Delete as i32,
+                "table {} pk {} emitted unexpected operation {}",
+                t.table, pk(t), t.operation,
             );
         }
     }
@@ -1309,6 +1348,87 @@ mod tests {
             .count();
         assert_eq!(hits, 1, "column written {} times, expected once", hits);
         assert_eq!(field(states[0], "total_supply_assets"), Some("250"));
+    }
+
+    fn text_del(key: &str) -> DeltaString {
+        // store.delete_prefix produces a DELETE delta whose new_value is empty.
+        DeltaString {
+            operation: DeltaOp::Delete,
+            ordinal: 0,
+            key: key.to_string(),
+            old_value: "900000000000000000".to_string(),
+            new_value: String::new(),
+        }
+    }
+
+    /// A healed position must be DELETED, not upserted with a blank health
+    /// factor. The blank is what Postgres rejects on a NUMERIC column, and the
+    /// stale row is what reports a liquidation that is no longer available.
+    #[test]
+    fn healed_position_is_deleted_not_blanked() {
+        let changes = Inputs {
+            liquidatable: vec![text_del(&format!("liq:{}:{}", MKT, USER))],
+            ..Default::default()
+        }
+        .run();
+
+        let rows_out = rows(&changes, "liquidatable_positions");
+        assert_eq!(rows_out.len(), 1);
+        assert_eq!(pk(rows_out[0]), format!("{}:{}", MKT, USER));
+        assert_eq!(rows_out[0].operation, Operation::Delete as i32,
+                   "a healed position must be deleted");
+        assert_eq!(field(rows_out[0], "health_factor_wad"), None,
+                   "a delete must not carry a health factor");
+    }
+
+    /// Defence in depth: an empty health factor is never written as a column,
+    /// whatever operation the delta claims.
+    #[test]
+    fn empty_health_factor_is_never_written() {
+        for value in ["", "   "] {
+            let changes = Inputs {
+                liquidatable: vec![text(&format!("liq:{}:{}", MKT, USER), value)],
+                ..Default::default()
+            }
+            .run();
+            for t in &changes.table_changes {
+                assert!(field(t, "health_factor_wad").is_none(),
+                        "empty health factor leaked into a column for {value:?}");
+            }
+        }
+    }
+
+    /// A live liquidatable position still upserts every column.
+    #[test]
+    fn live_liquidatable_position_still_upserts() {
+        let changes = Inputs {
+            liquidatable: vec![text(&format!("liq:{}:{}", MKT, USER), "900000000000000000")],
+            ..Default::default()
+        }
+        .run();
+        let r = rows(&changes, "liquidatable_positions");
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].operation, Operation::Upsert as i32);
+        assert_eq!(field(r[0], "health_factor_wad"), Some("900000000000000000"));
+        assert_eq!(field(r[0], "market_id"), Some(MKT));
+        assert_eq!(field(r[0], "user_address"), Some(USER));
+    }
+
+    /// Delete and write in one block resolve to a single operation, never two
+    /// changes for one primary key — that would be the CrashLoop all over again.
+    #[test]
+    fn delete_and_write_in_one_block_emit_one_change() {
+        let key = format!("liq:{}:{}", MKT, USER);
+        let changes = Inputs {
+            liquidatable: vec![text_del(&key), text(&key, "800000000000000000")],
+            ..Default::default()
+        }
+        .run();
+        let r = rows(&changes, "liquidatable_positions");
+        assert_eq!(r.len(), 1, "one primary key must yield one change");
+        // The later write wins: the position is liquidatable again.
+        assert_eq!(r[0].operation, Operation::Upsert as i32);
+        assert_eq!(field(r[0], "health_factor_wad"), Some("800000000000000000"));
     }
 
     /// A position keyed `{market}:{user}` is one row carrying both id columns.
